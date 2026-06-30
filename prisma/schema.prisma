@@ -1,0 +1,273 @@
+// Lead Dispatcher — Prisma schema
+// Production: PostgreSQL (Neon)
+// For local dev with SQLite: change provider to "sqlite" and use a file:// DATABASE_URL
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUTH & USERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  role         String   @default("admin") // admin | member
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SMTP / IMAP SENDING ACCOUNTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model SmtpAccount {
+  id              String   @id @default(cuid())
+  label           String // friendly name e.g. "Gmail - alice@acme.com"
+  emailAddress    String
+  fromName        String
+  // SMTP
+  smtpHost        String
+  smtpPort        Int
+  smtpUser        String
+  smtpPassEnc     String // AES-256-GCM encrypted
+  smtpSecure      Boolean  @default(true)
+  // IMAP
+  imapHost        String
+  imapPort        Int
+  imapUser        String
+  imapPassEnc     String // AES-256-GCM encrypted
+  imapSecure      Boolean  @default(true)
+  // Throttling
+  dailyCap        Int      @default(50) // 50-100 emails/day
+  hourlyCap       Int      @default(10)
+  // Warm-up state machine
+  warmupState     String   @default("cold") // cold | heating | warm | paused | suspended
+  warmupEnabled   Boolean  @default(true)
+  warmupDay       Int      @default(0) // ramp-up day counter
+  warmupTargetMax Int      @default(20)
+  warmupStartQty  Int      @default(2)
+  warmupIncrement Int      @default(2)
+  // Runtime counters
+  sentToday       Int      @default(0)
+  warmupSentToday Int      @default(0)
+  failureStreak   Int      @default(0)
+  lastSentAt      DateTime?
+  lastResetAt     DateTime @default(now())
+  status          String   @default("active") // active | paused | suspended | error
+  provider        String   @default("custom") // gmail | outlook | yahoo | custom
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([status])
+  @@index([warmupState])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CAMPAIGNS & LEADS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Campaign {
+  id              String   @id @default(cuid())
+  name            String
+  status          String   @default("draft") // draft | active | paused | completed | archived
+  csvFilename     String?
+  totalLeads      Int      @default(0)
+  sendingWindowStart Int   @default(9) // hour 0-23
+  sendingWindowEnd   Int   @default(17)
+  timezone        String   @default("UTC")
+  fromNameOverride String? // optional per-campaign from name
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  steps           EmailStep[]
+  leads           Lead[]
+  scheduledEmails ScheduledEmail[]
+
+  @@index([status])
+}
+
+model EmailStep {
+  id          String   @id @default(cuid())
+  campaignId  String
+  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  stepNumber  Int // 1, 2, 3
+  delayDays   Int // days after step 1 (0 for step 1)
+  subject     String
+  body        String
+  createdAt   DateTime @default(now())
+
+  @@unique([campaignId, stepNumber])
+  @@index([campaignId])
+}
+
+model Lead {
+  id              String   @id @default(cuid())
+  campaignId      String
+  campaign        Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  companyName     String?
+  email           String
+  website         String?
+  state           String?
+  industry        String?
+  // Pre-generated copy from CSV (snapshot at import)
+  outreachSubject String?
+  initialOutreach String?
+  followupDay3    String?
+  followupDay7    String?
+  // Sequence state
+  status          String   @default("pending")
+  // pending | step1_sent | step2_sent | step3_sent | replied | suppressed | bounced | unsubscribed
+  currentStep     Int      @default(0) // 0 = not started, 1/2/3 = last step sent
+  lastStepSentAt  DateTime?
+  repliedAt       DateTime?
+  bouncedAt       DateTime?
+  unsubscribedAt  DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  scheduledEmails ScheduledEmail[]
+  replies         Reply[]
+
+  @@unique([campaignId, email])
+  @@index([campaignId, status])
+  @@index([email])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QUEUE & SEND LOG
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ScheduledEmail {
+  id            String   @id @default(cuid())
+  campaignId    String
+  campaign      Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  leadId        String
+  lead          Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  stepNumber    Int
+  smtpAccountId String?
+  subject       String
+  body          String
+  status        String   @default("queued")
+  // queued | assigned | sending | sent | failed | skipped | cancelled
+  scheduledAt   DateTime
+  assignedAt    DateTime?
+  sentAt        DateTime?
+  attempts      Int      @default(0)
+  lastError     String?
+  messageId     String? // SMTP Message-ID for threading
+  createdAt     DateTime @default(now())
+
+  @@index([status, scheduledAt])
+  @@index([campaignId])
+  @@index([leadId])
+  @@index([smtpAccountId])
+}
+
+model EmailLog {
+  id            String   @id @default(cuid())
+  direction     String // outbound | inbound
+  smtpAccountId String?
+  leadId        String?
+  campaignId    String?
+  toEmail       String
+  fromEmail     String
+  subject       String
+  body          String
+  messageId     String?
+  inReplyTo     String?
+  references    String? // email thread references header
+  receivedAt    DateTime?
+  sentAt        DateTime?
+  isReply       Boolean  @default(false)
+  isWarmup      Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  @@index([leadId])
+  @@index([smtpAccountId])
+  @@index([campaignId])
+  @@index([messageId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WARM-UP ENGINE
+// ─────────────────────────────────────────────────────────────────────────────
+
+model WarmupMessage {
+  id            String   @id @default(cuid())
+  fromAccountId String
+  toAccountId   String
+  subject       String
+  body          String
+  threadId      String? // for multi-turn threads
+  status        String   @default("queued")
+  // queued | sent | received | rescued | replied | completed | failed
+  scheduledAt   DateTime
+  sentAt        DateTime?
+  receivedAt    DateTime?
+  rescuedAt     DateTime? // moved from spam to inbox
+  repliedAt     DateTime?
+  createdAt     DateTime @default(now())
+
+  @@index([status, scheduledAt])
+  @@index([fromAccountId])
+  @@index([toAccountId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UNIBOX / REPLIES
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Reply {
+  id            String   @id @default(cuid())
+  leadId        String
+  lead          Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  fromEmail     String
+  toEmail       String
+  subject       String
+  body          String
+  messageId     String?
+  inReplyTo     String?
+  receivedAt    DateTime
+  isRead        Boolean  @default(false)
+  sentiment     String? // interested | not_interested | ooo | unsubscribe | neutral (LLM-tagged later)
+  processed     Boolean  @default(false) // sequence-breaker ran
+  createdAt     DateTime @default(now())
+
+  @@index([leadId])
+  @@index([isRead])
+  @@index([receivedAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SUPPRESSION & COMPLIANCE
+// ─────────────────────────────────────────────────────────────────────────────
+
+model SuppressionList {
+  id        String   @id @default(cuid())
+  email     String
+  reason    String // unsubscribe | bounce | complaint | manual
+  source    String? // which campaign/account triggered it
+  createdAt DateTime @default(now())
+
+  @@unique([email, reason])
+  @@index([email])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SETTINGS (global key/value)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
