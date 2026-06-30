@@ -1,531 +1,514 @@
-# 🚀 Complete Setup Guide — Lead Dispatcher
+# 🚀 No-Terminal Setup Guide — Lead Dispatcher
 
-**This guide will walk you through setting up your cold email automation app from scratch. Follow each step in order. Don't skip ahead!**
-
----
-
-## 📋 What You're Building
-
-A cold email app that:
-- Sends thousands of personalized emails per day
-- Rotates between multiple sending accounts automatically
-- Warms up new email accounts to protect reputation
-- Shows all replies in one unified inbox
-- Auto-stops follow-ups when someone replies
-- Sends you Slack/Discord alerts when stuff happens
-
-**Total cost: $0** (everything runs on free tiers)
+**You will NOT use the terminal/command line at all. Everything is done through websites.**
 
 ---
 
-## 🛠️ What You Need Before Starting
-
-1. **A computer** with internet (you're reading this, so ✅)
-2. **A Google account** (Gmail works) — for Google Cloud + Vercel login
-3. **A GitHub account** — your code repos are already there:
-   - Frontend: https://github.com/interiorvisualsd-maker/cold-outreach-frontend
-   - Backend: https://github.com/interiorvisualsd-maker/cold-outreach-backend
-4. **30-45 minutes** of focused time
-
----
-
-## 🗺️ The Big Picture (How It All Works)
-
-```
-┌─────────────────────────────────────────────┐
-│  1. Neon (Database)                         │
-│  Stores all your data: leads, emails,       │
-│  accounts, replies                          │
-│  → https://neon.tech (FREE)                 │
-└──────────────────┬──────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────┐
-│  2. Google Cloud Run (Backend)              │
-│  The "brain" — sends emails, checks replies │
-│  → https://console.cloud.google.com ($300   │
-│    free credit for 90 days, then $0-8/mo)   │
-└──────────────────┬──────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────┐
-│  3. Vercel (Frontend)                       │
-│  The website you log into                   │
-│  → https://vercel.com (FREE)                │
-└─────────────────────────────────────────────┘
-```
-
-**Think of it like a restaurant:**
-- **Neon** = the pantry (stores ingredients/data)
-- **Cloud Run** = the kitchen (does the cooking/processing)
-- **Vercel** = the dining room (where you sit and interact)
+## 📋 What You Need
+- A Google account (Gmail)
+- Your GitHub repos already exist:
+  - Frontend: https://github.com/interiorvisualsd-maker/cold-outreach-frontend
+  - Backend: https://github.com/interiorvisualsd-maker/cold-outreach-backend
+- 30-45 minutes
+- A phone or computer with internet
 
 ---
 
-## STEP 1: Create Your Database (Neon) — 5 minutes
+## 🗺️ What We're Building (3 Websites)
 
-Neon is a free database service. Think of it as a spreadsheet in the cloud that your app uses to remember everything.
+| Step | Website | What It Does | Cost |
+|------|---------|-------------|------|
+| 1 | **Neon** | Stores your data (database) | $0 |
+| 2 | **Google Cloud** | Runs the backend (sends emails) | $0 (90-day $300 credit) |
+| 3 | **Vercel** | Hosts the website (what you log into) | $0 |
 
-### 1.1 Sign up
+---
+
+## STEP 1: Create Your Database — 5 minutes
+
+### What is this?
+Your app needs a place to store leads, emails, and replies. Neon gives you a free database.
+
+### Steps:
+
 1. Open **https://neon.tech** in your browser
-2. Click **"Sign up"** (top right)
+2. Click **"Sign up"** (top right corner)
 3. Click **"Continue with Google"**
 4. Pick your Google account
-5. Fill in your name if asked
-
-### 1.2 Create a project
-1. You'll see a page asking to create your first project
-2. **Project name**: type `lead-dispatcher`
-3. **Database name**: leave it as `neondb` (default)
-4. **Region**: pick the one closest to you (if unsure, pick `US East (Ohio)`)
-5. **Postgres version**: leave default (17)
+5. On the "Create your first project" page:
+   - **Project name**: type `lead-dispatcher`
+   - **Database name**: leave as `neondb`
+   - **Region**: pick the closest to you (if unsure, pick `US East (Ohio)`)
+   - **Postgres version**: leave default
 6. Click **"Create project"**
 
-### 1.3 Copy your connection string
-After creating, you'll see a page with a connection string. It looks like this:
+### Copy your database link:
+
+After creating, you'll see a page with a long link that looks like this:
 
 ```
 postgresql://lead_dispatcher_owner:AbCdEf123456@ep-cool-name-123456.us-east-2.aws.neon.tech/neondb?sslmode=require
 ```
 
-⚠️ **IMPORTANT**: Copy this ENTIRE string and paste it into a notepad. You'll need it 3 more times. This is your **DATABASE_URL**.
+⚠️ **COPY THIS ENTIRE LINK** and paste it into a Notes app on your phone or computer. You'll need it 2 more times. This is your **DATABASE LINK**.
 
-> 💡 If you lose it, go to your Neon dashboard → click your project → "Connection Details" tab → copy the connection string.
+> 💡 Lost it? Go to neon.tech → your project → "Connection Details" → copy it again.
 
 ---
 
 ## STEP 2: Set Up Google Cloud — 10 minutes
 
-This is where your backend (the "brain") will live.
+### What is this?
+Google Cloud will run your backend — the "brain" that sends emails and checks for replies.
 
-### 2.1 Create a Google Cloud project
+### 2A. Create a Google Cloud project
+
 1. Open **https://console.cloud.google.com**
 2. Sign in with your Google account
-3. Click the project dropdown at the top (it might say "Select a project")
-4. Click **"New Project"** (top right of the popup)
+3. At the top, click the project dropdown (says "Select a project")
+4. Click **"New Project"** (top right of popup)
 5. **Project name**: type `lead-dispatcher`
 6. Click **"Create"**
-7. Wait 10 seconds, then click the notification bell (🔔 top right) → "Select project"
+7. Wait 10 seconds, then click the 🔔 bell icon (top right) → **"Select project"**
 
-> 💡 You automatically get **$300 free credit** valid for 90 days. You won't be charged.
+> 💡 You automatically get $300 free credit (valid 90 days). You won't be charged.
 
-### 2.2 Enable the services you need
-Your app needs 4 Google services turned on. Do this for each one:
+### 2B. Turn on 4 services
 
-1. In the top search bar, type `Cloud Run API` and click the result
-2. Click **"Enable"** (if it says "Manage" instead, it's already on ✅)
-3. Go back, search `Cloud Build API` → Enable
-4. Search `Cloud Scheduler API` → Enable
-5. Search `Artifact Registry API` → Enable
+Your app needs 4 Google services. For each one:
+1. Click the search bar at the top
+2. Type the name
+3. Click the result
+4. Click **"Enable"** (if it says "Manage" instead, it's already on ✅)
 
-### 2.3 Install the Google Cloud CLI (command line tool)
+**Turn on these 4:**
+1. Search `Cloud Run API` → Enable
+2. Search `Cloud Build API` → Enable
+3. Search `Cloud Scheduler API` → Enable
+4. Search `Artifact Registry API` → Enable
 
-You need this to deploy your code. Pick your operating system:
+### 2C. Generate a secret for your cron worker
 
-**If you're on Mac:**
-1. Open **https://cloud.google.com/sdk/docs/install**
-2. Scroll to "macOS (64-bit)" → download the `.tar.gz` file
-3. Double-click to extract it
-4. Open the extracted folder in Terminal
-5. Run: `./install.sh`
-6. Restart your Terminal
+1. Go to **https://www.random.org/strings**
+2. Set: Length = `32`, Strings = `1`, Character set = `Alphanumeric`
+3. Click **"Get Strings"**
+4. Copy the generated string — this is your **CRON SECRET**
 
-**If you're on Windows:**
-1. Open **https://cloud.google.com/sdk/docs/install**
-2. Scroll to "Windows (64-bit)" → download the `.exe` installer
-3. Run the installer, click Next through all steps
-4. A black command window will pop up — follow the prompts
+Save this somewhere. It's like a password that lets Google's scheduler trigger your worker.
 
-**If you're on Linux:**
-```bash
-curl https://sdk.cloud.google.com | bash
-exec -l $SHELL
-gcloud init
-```
+### 2D. Generate two more secret keys
 
-### 2.4 Log in to Google Cloud from your terminal
-Open your terminal (Mac: Terminal app, Windows: search "cmd") and run:
+1. Go to **https://www.allkeysgenerator.com/Random/Security-Encryption-Key-Generator.aspx**
+2. Set key size to `256-bit` and click **"Generate"**
+3. Copy the hex string — this is your **JWT SECRET** (used for passwords)
+4. Click Generate again
+5. Copy the new hex string — this is your **ENCRYPTION KEY** (used to encrypt email passwords)
 
-```bash
-gcloud auth login
-```
-
-A browser window will open. Pick your Google account. Click "Allow".
-
-Then run:
-
-```bash
-gcloud config set project lead-dispatcher
-```
-
-> ✅ If you see a success message, you're logged in!
+Save both of these. You'll need them in the next step.
 
 ---
 
-## STEP 3: Deploy Your Backend to Cloud Run — 15 minutes
+## STEP 3: Deploy Your Backend — 15 minutes
 
-### 3.1 Download your backend code
+### What is this?
+This puts your backend code on Google's servers so it can send emails.
 
-Open your terminal and run these commands one at a time:
+### 3A. Open Cloud Run
 
-```bash
-# Go to your home folder
-cd ~
+1. Go to **https://console.cloud.google.com**
+2. Make sure "lead-dispatcher" is selected as your project (top bar)
+3. Search `Cloud Run` in the top search bar → click it
+4. Click **"Create Service"** (or "Deploy to Cloud Run")
 
-# Download the backend code
-git clone https://github.com/interiorvisualsd-maker/cold-outreach-backend.git
+### 3B. Connect your GitHub repo
 
-# Go into the folder
-cd cold-outreach-backend
-```
+1. Under **"Source"**, select **"Deploy from source"** (NOT "Deploy existing container")
+2. Click **"Connect to GitHub"** (or "Set up with Cloud Build")
+3. Authorize Google Cloud Build to access your GitHub
+4. Select your GitHub account
+5. Find and select **`cold-outreach-backend`** repository
+6. Click **"Next"**
 
-### 3.2 Set up the database
+### 3C. Configure the build
 
-Run these commands (replace `PASTE_YOUR_NEON_STRING_HERE` with your actual Neon connection string from Step 1.3):
+1. **Branch**: `main`
+2. **Build type**: should auto-detect the Dockerfile — leave as is
+3. Click **"Next"**
 
-```bash
-# Tell the app where your database is
-export DATABASE_URL="PASTE_YOUR_NEON_STRING_HERE"
+### 3D. Configure the service
 
-# Install dependencies (this takes 30-60 seconds)
-npm install
+1. **Service name**: `cold-outreach-api`
+2. **Region**: `us-central1` (or closest to you)
+3. **Authentication**: Select **"Allow unauthenticated invocations"** (IMPORTANT — otherwise the website can't talk to it)
+4. Under **"Container, Variables & Secrets, Networking, Security"** click to expand:
+   - **Container port**: `8080`
+   - **Memory**: `512 MiB`
+   - **CPU**: `1`
 
-# Create all the database tables
-npx prisma db push
+5. Click **"VARIABLES & SECRETS"** tab → **"Add Variable"** for each of these:
 
-# Generate the database client
-npx prisma generate
-```
+| Variable name | Value |
+|---------------|-------|
+| `DATABASE_URL` | Paste your **DATABASE LINK** from Step 1 |
+| `JWT_SECRET` | Paste your **JWT SECRET** from Step 2D |
+| `ENCRYPTION_KEY` | Paste your **ENCRYPTION KEY** from Step 2D |
+| `CRON_SECRET` | Paste your **CRON SECRET** from Step 2C |
+| `FRONTEND_URL` | `https://cold-outreach-frontend.vercel.app` (we'll fix this later) |
+| `PUBLIC_BASE_URL` | `https://cold-outreach-frontend.vercel.app` (same as above) |
 
-> ✅ If you see "🚀 Your database is now in sync", it worked!
+6. Under **"Autoscaling"**:
+   - **Minimum instances**: `0` (saves money — scales to zero when idle)
+   - **Maximum instances**: `3`
 
-### 3.3 Generate secret keys
+7. Click **"Create"** or **"Deploy"**
 
-Your app needs two secret keys to keep passwords and data safe. Run these two commands and **save the outputs** — you'll need them:
+### 3E. Wait for deployment
 
-```bash
-# Generate key #1 (for passwords)
-openssl rand -hex 32
-```
-
-Copy the output (64 characters of random letters/numbers). This is your **JWT_SECRET**.
-
-```bash
-# Generate key #2 (for encrypting email passwords)
-openssl rand -hex 32
-```
-
-Copy the output. This is your **ENCRYPTION_KEY**.
-
-### 3.4 Deploy to Cloud Run
-
-Now the big moment! Run this command (replace ALL the placeholder values):
-
-```bash
-gcloud run deploy cold-outreach-api \
-  --source . \
-  --region us-central1 \
-  --port 8080 \
-  --memory 512Mi \
-  --cpu 1 \
-  --min-instances 0 \
-  --max-instances 3 \
-  --allow-unauthenticated \
-  --set-env-vars "DATABASE_URL=PASTE_YOUR_NEON_STRING_HERE" \
-  --set-env-vars "JWT_SECRET=PASTE_YOUR_JWT_SECRET" \
-  --set-env-vars "ENCRYPTION_KEY=PASTE_YOUR_ENCRYPTION_KEY" \
-  --set-env-vars "FRONTEND_URL=https://cold-outreach-frontend.vercel.app" \
-  --set-env-vars "PUBLIC_BASE_URL=https://cold-outreach-frontend.vercel.app"
-```
-
-**What to replace:**
-- `PASTE_YOUR_NEON_STRING_HERE` → your Neon connection string from Step 1.3
-- `PASTE_YOUR_JWT_SECRET` → the first key you generated
-- `PASTE_YOUR_ENCRYPTION_KEY` → the second key you generated
-
-**What happens next:**
 - Google will build your code (takes 3-5 minutes)
-- You'll see a progress bar with percentages
-- When done, you'll see a URL like:
+- You'll see a log stream — don't worry, just wait
+- When done, you'll see a green checkmark ✅
+- At the top, you'll see a URL like:
   ```
   https://cold-outreach-api-1234567-uc.a.run.app
   ```
 
-⚠️ **IMPORTANT**: Copy this URL! This is your **BACKEND_URL**. You'll need it in Step 4.
-
-### 3.5 Set up the background worker (sends emails automatically)
-
-Your app needs a "worker" that runs every 5 minutes to send queued emails and check for replies. Run these commands:
-
-```bash
-# Create the worker job
-gcloud run jobs create cold-outreach-worker \
-  --source . \
-  --region us-central1 \
-  --command "bun" --args "src/worker-job.ts" \
-  --set-env-vars "DATABASE_URL=PASTE_YOUR_NEON_STRING_HERE" \
-  --set-env-vars "JWT_SECRET=PASTE_YOUR_JWT_SECRET" \
-  --set-env-vars "ENCRYPTION_KEY=PASTE_YOUR_ENCRYPTION_KEY"
-
-# Schedule it to run every 5 minutes
-gcloud scheduler jobs create http cold-outreach-worker-trigger \
-  --schedule "*/5 * * * *" \
-  --uri "PASTE_YOUR_BACKEND_URL/api/dispatcher/process" \
-  --http-method POST \
-  --oauth-service-account-email $(gcloud projects describe lead-dispatcher --format="value(projectNumber)")@cloudbuild.gserviceaccount.com
-```
-
-**Replace:**
-- `PASTE_YOUR_NEON_STRING_HERE` → your Neon string
-- `PASTE_YOUR_JWT_SECRET` → your JWT secret
-- `PASTE_YOUR_ENCRYPTION_KEY` → your encryption key
-- `PASTE_YOUR_BACKEND_URL` → the URL from Step 3.4 (like `https://cold-outreach-api-1234567-uc.a.run.app`)
-
-> ✅ If you see "Created [cold-outreach-worker-trigger]", you're done with the backend!
+⚠️ **COPY THIS URL** — this is your **BACKEND URL**. You'll need it!
 
 ---
 
-## STEP 4: Deploy Your Frontend to Vercel — 5 minutes
+## STEP 4: Set Up the Email Sender (Worker) — 5 minutes
 
-### 4.1 Go to Vercel
+### What is this?
+Your app needs to check every 5 minutes: "Are there emails to send? Any new replies?" Google Cloud Scheduler does this automatically.
+
+### 4A. Create a Cloud Scheduler job
+
+1. In Google Cloud Console, search `Cloud Scheduler` → click it
+2. Click **"Create Job"**
+3. Fill in:
+   - **Name**: `lead-dispatcher-worker`
+   - **Description**: `Sends emails and checks replies every 5 minutes`
+   - **Frequency**: type `*/5 * * * *` (this means "every 5 minutes")
+   - **Timezone**: pick your timezone
+4. Click **"Continue"**
+
+5. Under **"Configure the execution"**:
+   - **Target type**: select **"HTTP"**
+   - **URL**: type your backend URL + `/api/cron/` + your CRON SECRET
+     - Example: `https://cold-outreach-api-1234567-uc.a.run.app/api/cron/AbCdEf123456`
+     - (Replace with your actual BACKEND URL and CRON SECRET)
+   - **HTTP method**: **POST**
+   - **Headers**: click "Add header"
+     - Key: `Content-Type`
+     - Value: `application/json`
+   - **Body**: type `{}`
+
+6. Click **"Create"**
+
+### 4B. Test it
+
+1. You'll see your job in the list
+2. Click the **three dots** (⋮) on the right → **"Run now"**
+3. Wait 10 seconds
+4. Click the job → look at the "Last run result" — should say "Success" ✅
+
+> If it fails, check:
+> - Is the URL correct? (should end with `/api/cron/YOUR_SECRET`)
+> - Is the method POST?
+> - Did you include the CRON_SECRET in the URL?
+
+---
+
+## STEP 5: Deploy Your Frontend (Website) — 5 minutes
+
+### What is this?
+This is the actual website you'll log into to manage your campaigns.
+
+### 5A. Import to Vercel
+
 1. Open **https://vercel.com**
 2. Click **"Sign Up"** (top right)
 3. Click **"Continue with GitHub"**
-4. Authorize Vercel to access your GitHub
+4. Authorize Vercel
 
-### 4.2 Import your frontend repo
+### 5B. Import your repo
+
 1. Click **"Add New..."** → **"Project"**
-2. You'll see a list of your GitHub repos
-3. Find `cold-outreach-frontend` → click **"Import"**
+2. Find `cold-outreach-frontend` in the list
+3. Click **"Import"**
 
-### 4.3 Configure the deployment
-1. **Framework Preset**: Should auto-detect "Next.js" ✅
-2. Don't touch the Build & Output Settings
-3. **IMPORTANT — Environment Variables**: Click the dropdown and add these one by one:
+### 5C. Configure
 
+1. **Framework Preset**: should auto-detect "Next.js" ✅
+2. Don't touch Build/Output settings
+3. **IMPORTANT** — expand **"Environment Variables"**:
+
+   Click "Add" and enter:
    | Name | Value |
    |------|-------|
-   | `NEXT_PUBLIC_API_URL` | `PASTE_YOUR_BACKEND_URL` (from Step 3.4) |
-
-   **Example value**: `https://cold-outreach-api-1234567-uc.a.run.app`
+   | `NEXT_PUBLIC_API_URL` | Paste your **BACKEND URL** from Step 3E (like `https://cold-outreach-api-1234567-uc.a.run.app`) |
 
 4. Click **"Deploy"**
 
-### 4.4 Wait for deployment
-- You'll see a cool animation while it builds
-- Takes 2-3 minutes
-- When done, you'll see **"Congratulations!"** with confetti 🎉
-- Click **"Visit"** to see your live site
+### 5D. Wait + copy URL
 
-> ⚠️ The URL looks like `cold-outreach-frontend-abc123.vercel.app`. Copy this — it's your **FRONTEND_URL**.
+- Watch the cool animation (takes 2-3 minutes)
+- When done, you'll see confetti 🎉
+- Click **"Visit"** to see your site
+- Your URL looks like: `https://cold-outreach-frontend-abc123.vercel.app`
+
+⚠️ **COPY THIS URL** — this is your **WEBSITE URL**.
 
 ---
 
-## STEP 5: Connect Frontend and Backend — 2 minutes
+## STEP 6: Connect Frontend and Backend — 2 minutes
 
-Right now your frontend can't talk to your backend because of a security rule called CORS. Let's fix that.
+### What is this?
+Right now your website can't talk to your backend (security rule called CORS). Let's fix it.
 
-### 5.1 Update backend environment variables
+### Steps:
+
 1. Go back to **Google Cloud Console** → **Cloud Run**
 2. Click your `cold-outreach-api` service
 3. Click **"Edit & Deploy New Revision"** (top right)
-4. Scroll down to **"Variables & Secrets"**
-5. Update `FRONTEND_URL` to your Vercel URL:
-   ```
-   FRONTEND_URL=https://cold-outreach-frontend-abc123.vercel.app
-   ```
-6. Also update `PUBLIC_BASE_URL` to the same Vercel URL
-7. Click **"Deploy"** at the bottom
-
-> ✅ Takes about 2 minutes to redeploy.
+4. Scroll to **"Variables & Secrets"** section
+5. Update these two variables to your actual Vercel URL:
+   - `FRONTEND_URL` = `https://cold-outreach-frontend-abc123.vercel.app` (your WEBSITE URL)
+   - `PUBLIC_BASE_URL` = `https://cold-outreach-frontend-abc123.vercel.app` (same)
+6. Click **"Deploy"** at the bottom
+7. Wait 2 minutes for redeployment
 
 ---
 
-## STEP 6: Create Your Account — 1 minute
+## STEP 7: Create Your Account — 1 minute
 
-1. Open your Vercel URL in your browser
-2. You'll see a login page with a violet gradient on the left
+1. Open your **WEBSITE URL** in your browser
+2. You'll see a beautiful login page
 3. Click **"Sign up"** (bottom link)
 4. Fill in:
    - **Full Name**: your name
    - **Email**: your email
-   - **Password**: pick something strong (6+ characters)
+   - **Password**: at least 6 characters
 5. Click **"Create account"**
-6. You're in! 🎉
 
-> The first person to sign up automatically becomes the admin.
+🎉 **You're in!** You're the admin.
 
 ---
 
-## STEP 7: Add Demo Data (Optional but Recommended) — 30 seconds
+## STEP 8: Add Demo Data — 30 seconds
 
 To see how the app looks with real data:
 
-1. On the dashboard, click **"Seed Demo Data"** (violet button, top right)
-2. Wait 2 seconds
-3. You'll now see:
-   - 4 sending accounts
-   - 2 campaigns with 48 leads
-   - 40 warmup messages
-   - 12 replies
-   - 5 notifications
+1. On the dashboard, find the **"Seed Demo Data"** button (top right, violet color)
+2. Click it
+3. Wait 2 seconds
+
+You'll now see:
+- 4 sending accounts (Gmail + Outlook)
+- 2 campaigns with 48 leads
+- 40 warmup messages
+- 12 replies
+- 5 notifications
+
+Explore around! Click different tabs on the left sidebar to see everything.
 
 ---
 
-## STEP 8: Connect Real Email Accounts — When You're Ready
+## STEP 9: Connect Real Email Accounts — When You're Ready
 
-When you want to send real emails (not just demo):
+### For Gmail:
 
-1. Go to **Sending Accounts** (left sidebar)
-2. Click **"Add Account"**
-3. Fill in your SMTP/IMAP details:
-   - **For Gmail**: use an "App Password" (not your regular password)
-     - Go to https://myaccount.google.com → Security → 2-Step Verification → App passwords
-     - Create a password for "Mail"
-     - SMTP host: `smtp.gmail.com`, port: `465`
-     - IMAP host: `imap.gmail.com`, port: `993`
-4. Click **"Create Account"**
-5. Click **"Test"** to verify the connection works
+1. First, create an **App Password** (NOT your regular Gmail password):
+   - Go to **https://myaccount.google.com**
+   - Click **"Security"** (left sidebar)
+   - Make sure **2-Step Verification** is turned ON
+   - Click **"2-Step Verification"** → scroll down → **"App passwords"**
+   - App name: type `Lead Dispatcher`
+   - Click **"Create"**
+   - Copy the 16-character password it gives you
 
-> ⚠️ Start with the daily cap at 50, not 100. You can increase it later once the account is warmed up.
+2. In your Lead Dispatcher app:
+   - Go to **"Sending Accounts"** (left sidebar)
+   - Click **"Add Account"**
+   - Fill in:
+     - **Label**: `Gmail - yourname@gmail.com`
+     - **Email Address**: your Gmail
+     - **From Name**: your name
+     - **Provider**: select **"Gmail"** (this auto-fills SMTP/IMAP settings!)
+     - **SMTP Password**: paste the App Password from step 1
+     - **IMAP Password**: same App Password
+     - **Daily Cap**: start with `50`
+   - Click **"Create Account"**
+
+3. Click **"Test"** to verify it works
+
+> ⚠️ Start with daily cap = 50. Increase to 100 only after the account is warmed up (1-2 weeks).
 
 ---
 
-## STEP 9: Import Your Leads — When You're Ready
+## STEP 10: Import Your Leads — When You're Ready
 
-1. Go to **Import Leads** (left sidebar)
-2. Select a campaign (or create one first)
-3. Drag your CSV file into the upload area
-   - **Any filename works** — the app auto-detects columns
-4. Review the column mapping (it's usually correct)
+1. Go to **"Import Leads"** (left sidebar)
+2. **Select a campaign** from the dropdown (or create one in Campaigns first)
+3. **Drag your CSV file** into the upload area
+   - Any filename works! The app auto-detects columns
+4. Review the column mapping (it's usually correct — if not, use the dropdowns)
 5. Click **"Import"**
-6. You'll see how many leads were imported, skipped (duplicates), etc.
+6. See how many leads were imported, skipped (duplicates), or suppressed
+
+> 💡 Download the template from the Import page to see the expected format
 
 ---
 
-## STEP 10: Optional — Enable AI Reply Tagging (DeepSeek)
+## STEP 11: Optional — Enable AI Reply Tagging
 
-If you want the app to automatically classify replies as "interested", "not interested", etc:
+If you want the app to automatically label replies as "interested", "not interested", etc:
 
+### Get a DeepSeek API key:
 1. Go to **https://platform.deepseek.com** → sign up
-2. Add some credits ($5 is plenty — it's very cheap)
+2. Add $5 credit (very cheap, lasts months)
 3. Copy your API key (starts with `sk-`)
-4. In Google Cloud Run, edit your `cold-outreach-api` service
-5. Add environment variable:
-   ```
-   DEEPSEEK_API_KEY=sk-your-key-here
-   ```
-6. Deploy
 
-Now replies get auto-tagged! You can also test it in **Settings → Integrations → DeepSeek LLM → Test Connection**.
+### Add it to your backend:
+1. Go to **Google Cloud Console** → **Cloud Run**
+2. Click `cold-outreach-api` → **"Edit & Deploy New Revision"**
+3. Under **"Variables & Secrets"** → Add Variable:
+   | Name | Value |
+   |------|-------|
+   | `DEEPSEEK_API_KEY` | `sk-your-key-here` |
+4. Click **"Deploy"**
+
+### Test it:
+1. In your app: **Settings → Integrations → DeepSeek LLM → Test Connection**
 
 ---
 
-## STEP 11: Optional — Set Up Slack/Discord Alerts
+## STEP 12: Optional — Slack/Discord Alerts
 
 Get notified in Slack or Discord when someone replies, bounces, or unsubscribes:
 
-1. **For Slack**:
-   - Go to your Slack workspace → Settings → Integrations → Incoming Webhooks
-   - Create a webhook for a channel (like #alerts)
-   - Copy the URL (looks like `https://hooks.slack.com/services/...`)
+### Get your webhook URL:
 
-2. **For Discord**:
-   - Go to your server → Channel Settings → Integrations → Webhooks
-   - New Webhook → Copy URL
+**For Slack:**
+1. Go to https://api.slack.com/messaging/webhooks → "Create your app"
+2. Pick your workspace → create app
+3. Go to "Incoming Webhooks" → turn ON
+4. Click "Add New Webhook to Workspace"
+5. Pick a channel (like #alerts) → copy the URL
+   - Looks like: `https://hooks.slack.com/services/T000/B000/XXXX`
 
-3. In your app: **Settings → Integrations → Webhooks → Add Webhook**
-4. Paste the URL, pick the type (Slack/Discord), select events
+**For Discord:**
+1. Open Discord → your server
+2. Right-click a channel → **"Edit Channel"**
+3. Click **"Integrations"** → **"Webhooks"** → **"New Webhook"**
+4. Copy the URL
+
+### Add it to your app:
+1. Go to **Settings → Integrations** (in your Lead Dispatcher app)
+2. Scroll to **"Webhooks"** section
+3. Click **"Add Webhook"**
+4. Fill in:
+   - **Type**: Slack or Discord
+   - **URL**: paste your webhook URL
+   - **Events**: check which events to forward (replies, bounces, etc.)
 5. Click **"Add Webhook"**
-6. Click **"Test"** to verify
+6. Click **"Test"** — check your Slack/Discord for a test message!
 
 ---
 
-## 🎯 You're Done! Here's What You Can Do Now
+## 🎯 You're Done! What Now?
 
-| Feature | Where to find it |
-|---------|-----------------|
-| View analytics | Dashboard |
-| Add email accounts | Sending Accounts |
-| Create campaigns | Campaigns |
-| Upload leads | Import Leads |
-| Check the send queue | Dispatcher |
-| See warm-up progress | Warm-up |
-| Read and reply to emails | Unibox |
-| Manage blocked emails | Suppression |
-| Create email templates | Templates |
-| Add team members | Team |
-| Configure settings | Settings |
+| Want to... | Go to... |
+|-----------|----------|
+| See your analytics | **Dashboard** |
+| Add more email accounts | **Sending Accounts** |
+| Create a new campaign | **Campaigns** → New Campaign |
+| Upload more leads | **Import Leads** |
+| Check the email queue | **Dispatcher** |
+| See warm-up progress | **Warm-up** |
+| Read and reply to emails | **Unibox** |
+| See blocked emails | **Suppression** |
+| Create email templates | **Templates** |
+| Add team members | **Team** (they sign up at the login page) |
+| Change settings | **Settings** |
 
-### Pro Tips:
-- **Press Cmd+K (Mac) or Ctrl+K (Windows)** anywhere to open the command palette — search leads, navigate views, and more
-- **Click any lead email** in the campaigns table or unibox to see their full activity timeline
-- **Set daily caps to 50** for new accounts — increase to 100 only after warm-up
-- **Check the notification bell** (top right) for alerts about replies, bounces, and failures
+### 💡 Pro Tips:
+- **Press Cmd+K (Mac) or Ctrl+K (Windows)** to open a search bar — search leads, jump to any page
+- **Click any lead's email** to see their full activity timeline
+- **Set daily caps to 50** for new accounts — increase after warm-up
+- **Check the bell icon** (top right) for alerts
+- **Notification preferences**: Settings → Integrations → toggle which events notify you
 
 ---
 
 ## 🆘 Troubleshooting
 
-### "Failed to fetch" on the website
-→ Your frontend can't reach the backend. Check:
-1. Is `NEXT_PUBLIC_API_URL` set correctly in Vercel? (should be your Cloud Run URL)
-2. Is `FRONTEND_URL` set correctly in Cloud Run? (should be your Vercel URL)
-3. Did you redeploy after changing env vars?
+### "Failed to fetch" or blank page
+Your website can't reach your backend. Check:
+1. In Vercel: is `NEXT_PUBLIC_API_URL` set to your BACKEND URL? (Settings → Environment Variables)
+2. In Cloud Run: is `FRONTEND_URL` set to your Vercel URL?
+3. Did you redeploy after changing them?
 
-### "Unauthorized" when using the app
-→ Your login token expired. Just log out and log back in.
+### "Unauthorized" errors
+Your login expired. Just log out and log back in.
 
-### Database connection errors
-→ Your Neon string needs `?sslmode=require` at the end. Check:
+### Database won't connect
+Your Neon link needs `?sslmode=require` at the end:
 ```
 postgresql://user:pass@host/db?sslmode=require
 ```
 
 ### Cloud Run deployment fails
-→ Make sure you:
-1. Enabled all 4 APIs (Cloud Run, Cloud Build, Cloud Scheduler, Artifact Registry)
-2. Ran `gcloud auth login` successfully
-3. Are in the `cold-outreach-backend` folder when deploying
+1. Make sure all 4 APIs are enabled (Step 2B)
+2. Make sure you selected "Allow unauthenticated invocations"
+3. Make sure your GitHub repo is connected properly
 
-### Worker not running
-→ Check:
-1. Go to Cloud Console → Cloud Scheduler
-2. Is the `cold-outreach-worker-trigger` job there?
-3. Click it → "Run now" to test manually
+### Worker doesn't seem to run
+1. Go to Google Cloud Console → Cloud Scheduler
+2. Click your `lead-dispatcher-worker` job
+3. Click "Run now" to test
 4. Check the logs for errors
+5. Verify the URL is correct: `https://YOUR-BACKEND-URL/api/cron/YOUR-CRON-SECRET`
 
-### SMTP sending fails
-→ Common causes:
-1. **Gmail**: Use App Password, not your regular password
-2. **Less secure apps**: Some providers block SMTP by default
-3. **Wrong port**: Try 587 (TLS) instead of 465 (SSL)
+### Email sending fails
+1. **Gmail**: You MUST use an App Password, not your regular password
+2. **Daily cap too high**: Start with 50, not 100
+3. **Account needs warm-up**: New accounts should warm up for 1-2 weeks before sending
+
+### Can't find the "Seed Demo Data" button
+It's on the **Dashboard** page, top right corner, next to the "Refresh" button. It has a sparkle ✨ icon.
 
 ---
 
-## 💰 Cost Breakdown
+## 💰 How Much Does This Cost?
 
-| Service | Free Tier | Your Usage | Monthly Cost |
-|---------|-----------|------------|--------------|
-| Vercel | Hobby (free) | Static site | $0 |
-| Cloud Run API | 240k vCPU-sec/mo free | ~5% of free tier | $0 |
-| Cloud Run Worker | Same free tier | ~10% | $0 |
-| Cloud Scheduler | 3 jobs free | 1 job | $0 |
-| Neon Postgres | 0.5GB free | <100MB | $0 |
+| Service | Free Amount | What You Use | Cost |
+|---------|------------|-------------|------|
+| **Vercel** (website) | Free forever | Small site | $0 |
+| **Google Cloud Run** (backend) | 240k vCPU-sec/month free | ~5% of free tier | $0 |
+| **Google Cloud Scheduler** (worker) | 3 jobs free | 1 job | $0 |
+| **Neon** (database) | 0.5GB free | <100MB | $0 |
 | **Total** | | | **$0/month** |
 
-After 90 days, the GCP $300 credit expires but you stay on the always-free tier. Expected cost: **$0-8/month**.
+After 90 days: Google's $300 credit expires, but the always-free tier still covers your usage. Expected: **$0-8/month**.
 
-Optional: Cloud NAT for a static sending IP (~$33/month) — recommended for serious cold email deliverability.
-
----
-
-## 📞 Need Help?
-
-- **Code**: https://github.com/interiorvisualsd-maker/cold-outreach-frontend + cold-outreach-backend
-- **Worklog**: See `worklog.md` in the repo for full development history
-- **Setup video**: The steps above are all you need — take it one step at a time!
+Optional: Add Cloud NAT (~$33/month) for a fixed IP address — improves email deliverability but not required.
 
 ---
 
-**🎉 Congratulations! You now have your own cold email automation platform running for $0/month.**
+## 📞 Quick Reference — All Your Important Links
+
+Fill this in as you go, then save it:
+
+```
+DATABASE LINK:     postgresql://...     (from Neon, Step 1)
+JWT SECRET:        __________________   (from Step 2D)
+ENCRYPTION KEY:    __________________   (from Step 2D)
+CRON SECRET:       __________________   (from Step 2C)
+BACKEND URL:       https://cold-outreach-api-______.a.run.app  (from Step 3E)
+WEBSITE URL:       https://cold-outreach-frontend-______.vercel.app  (from Step 5D)
+```
+
+---
+
+**🎉 Congratulations! You've built your own cold email platform without touching a terminal. Now go send some emails!**
