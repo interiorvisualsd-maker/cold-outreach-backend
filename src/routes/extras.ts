@@ -947,4 +947,144 @@ app.post('/unsubscribe/:leadId', async (c) => {
   return c.json({ ok: true, message: 'You have been unsubscribed successfully' })
 })
 
+// ─────────────────────────────────────────────────────────────────────────────
+// WEBHOOKS — Slack/Discord/generic integration management
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface WebhookConfig {
+  id: string
+  url: string
+  type: 'slack' | 'discord' | 'generic'
+  enabled: boolean
+  events: string[]
+  label?: string
+}
+
+async function getWebhooks(): Promise<WebhookConfig[]> {
+  const setting = await db.setting.findUnique({ where: { key: 'webhooks' } })
+  if (!setting) return []
+  try { return JSON.parse(setting.value) } catch { return [] }
+}
+
+async function saveWebhooks(hooks: WebhookConfig[]) {
+  await db.setting.upsert({
+    where: { key: 'webhooks' },
+    create: { key: 'webhooks', value: JSON.stringify(hooks) },
+    update: { value: JSON.stringify(hooks) },
+  })
+  // Invalidate the in-memory cache
+  const { invalidateWebhookCache } = await import('../lib/notifications')
+  invalidateWebhookCache()
+}
+
+app.get('/webhooks', async (c) => {
+  const webhooks = await getWebhooks()
+  const eventTypes = [
+    { type: 'reply', label: 'New replies' },
+    { type: 'bounce', label: 'Email bounces' },
+    { type: 'unsubscribe', label: 'Unsubscribes' },
+    { type: 'failure', label: 'SMTP failures' },
+    { type: 'warmup', label: 'Warm-up milestones' },
+    { type: 'system', label: 'System alerts' },
+  ]
+  return c.json({ webhooks, eventTypes })
+})
+
+app.post('/webhooks', async (c) => {
+  const body = await c.req.json()
+  const { url, type, events, label } = body
+  if (!url || !type) return c.json({ error: 'url and type required' }, 400)
+  if (!['slack', 'discord', 'generic'].includes(type)) return c.json({ error: 'Invalid type' }, 400)
+
+  const webhooks = await getWebhooks()
+  const newHook: WebhookConfig = {
+    id: `hook_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+    url,
+    type,
+    enabled: true,
+    events: events || [],
+    label: label || `${type} webhook`,
+  }
+  webhooks.push(newHook)
+  await saveWebhooks(webhooks)
+  return c.json({ webhook: newHook })
+})
+
+app.put('/webhooks/:id', async (c) => {
+  const id = c.req.param('id')
+  const body = await c.req.json()
+  const { url, type, events, enabled, label } = body
+  const webhooks = await getWebhooks()
+  const idx = webhooks.findIndex((w) => w.id === id)
+  if (idx === -1) return c.json({ error: 'Not found' }, 404)
+  webhooks[idx] = {
+    ...webhooks[idx],
+    url: url ?? webhooks[idx].url,
+    type: type ?? webhooks[idx].type,
+    events: events ?? webhooks[idx].events,
+    enabled: enabled ?? webhooks[idx].enabled,
+    label: label ?? webhooks[idx].label,
+  }
+  await saveWebhooks(webhooks)
+  return c.json({ webhook: webhooks[idx] })
+})
+
+app.delete('/webhooks/:id', async (c) => {
+  const id = c.req.param('id')
+  const webhooks = await getWebhooks()
+  const filtered = webhooks.filter((w) => w.id !== id)
+  if (filtered.length === webhooks.length) return c.json({ error: 'Not found' }, 404)
+  await saveWebhooks(filtered)
+  return c.json({ ok: true })
+})
+
+// Test webhook — sends a test notification to the specified URL
+app.post('/webhooks/test', async (c) => {
+  const body = await c.req.json()
+  const { url, type } = body
+  if (!url || !type) return c.json({ error: 'url and type required' }, 400)
+
+  try {
+    let payload: Record<string, any>
+    if (type === 'slack') {
+      payload = {
+        attachments: [{
+          color: '#6366f1',
+          title: '✅ Lead Dispatcher webhook test',
+          text: 'If you see this message, your webhook is configured correctly!',
+          footer: 'Lead Dispatcher',
+          ts: Math.floor(Date.now() / 1000),
+        }],
+      }
+    } else if (type === 'discord') {
+      payload = {
+        embeds: [{
+          title: '✅ Lead Dispatcher webhook test',
+          description: 'If you see this message, your webhook is configured correctly!',
+          color: 0x6366f1,
+          footer: { text: 'Lead Dispatcher' },
+          timestamp: new Date().toISOString(),
+        }],
+      }
+    } else {
+      payload = { event: 'test', title: 'Webhook test', message: 'Configuration successful', timestamp: new Date().toISOString() }
+    }
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(10000),
+    })
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      return c.json({ ok: false, error: `Webhook returned ${res.status}: ${text.slice(0, 200)}` })
+    }
+    return c.json({ ok: true, message: 'Test notification sent successfully' })
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || 'Failed to send test' })
+  }
+})
+
 export default app
