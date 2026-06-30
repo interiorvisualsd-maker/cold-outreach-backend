@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import { db } from '../lib/db'
 import { sendMail } from '../lib/smtp'
 import { clearTransportCache } from '../lib/smtp'
+import { pushNotification } from '../lib/notifications'
 import type { SmtpAccount } from '@prisma/client'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -214,6 +215,12 @@ export async function processSendBatch(batchSize = 50): Promise<{
         })
         clearTransportCache(account.id)
         errors.push(`Account ${account.emailAddress} auto-paused after 3 failures`)
+        await pushNotification({
+          type: 'failure',
+          severity: 'error',
+          title: 'SMTP account auto-paused',
+          message: `${account.emailAddress} paused after 3 consecutive send failures.`,
+        }).catch(() => {})
       }
     }
   }

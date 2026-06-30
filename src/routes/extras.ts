@@ -729,6 +729,174 @@ app.get('/search/leads', async (c) => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// LEAD DETAIL — full timeline of emails sent + replies for a single lead
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.get('/leads/:id/detail', async (c) => {
+  const id = c.req.param('id')
+  const lead = await db.lead.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      email: true,
+      companyName: true,
+      website: true,
+      state: true,
+      industry: true,
+      status: true,
+      currentStep: true,
+      lastStepSentAt: true,
+      repliedAt: true,
+      bouncedAt: true,
+      unsubscribedAt: true,
+      createdAt: true,
+      updatedAt: true,
+      outreachSubject: true,
+      initialOutreach: true,
+      followupDay3: true,
+      followupDay7: true,
+      campaign: { select: { id: true, name: true, status: true } },
+    },
+  })
+  if (!lead) return c.json({ error: 'Lead not found' }, 404)
+
+  const [emails, replies] = await Promise.all([
+    db.scheduledEmail.findMany({
+      where: { leadId: id },
+      select: {
+        id: true,
+        stepNumber: true,
+        subject: true,
+        body: true,
+        status: true,
+        scheduledAt: true,
+        sentAt: true,
+        attempts: true,
+        lastError: true,
+        smtpAccountId: true,
+        openCount: true,
+        openedAt: true,
+        clickCount: true,
+        clickedAt: true,
+      },
+      orderBy: { stepNumber: 'asc' },
+    }),
+    db.reply.findMany({
+      where: { leadId: id },
+      select: {
+        id: true,
+        fromEmail: true,
+        toEmail: true,
+        subject: true,
+        body: true,
+        messageId: true,
+        receivedAt: true,
+        isRead: true,
+        sentiment: true,
+      },
+      orderBy: { receivedAt: 'asc' },
+    }),
+  ])
+
+  // Build unified timeline
+  interface TimelineEvent {
+    id: string
+    type: 'email_sent' | 'email_queued' | 'email_failed' | 'reply' | 'open' | 'click'
+    timestamp: string
+    title: string
+    description: string
+    metadata?: Record<string, any>
+  }
+  const timeline: TimelineEvent[] = []
+
+  for (const email of emails) {
+    if (email.status === 'sent' && email.sentAt) {
+      timeline.push({
+        id: `email-${email.id}`,
+        type: 'email_sent',
+        timestamp: email.sentAt.toISOString(),
+        title: `Step ${email.stepNumber} sent`,
+        description: email.subject,
+        metadata: {
+          step: email.stepNumber,
+          subject: email.subject,
+          body: email.body,
+          openCount: email.openCount,
+          clickCount: email.clickCount,
+        },
+      })
+      // Add open/click events
+      if (email.openedAt && email.openCount > 0) {
+        timeline.push({
+          id: `open-${email.id}`,
+          type: 'open',
+          timestamp: email.openedAt.toISOString(),
+          title: `Step ${email.stepNumber} opened`,
+          description: `Email opened ${email.openCount}x`,
+        })
+      }
+      if (email.clickedAt && email.clickCount > 0) {
+        timeline.push({
+          id: `click-${email.id}`,
+          type: 'click',
+          timestamp: email.clickedAt.toISOString(),
+          title: `Step ${email.stepNumber} link clicked`,
+          description: `Link clicked ${email.clickCount}x`,
+        })
+      }
+    } else if (email.status === 'queued') {
+      timeline.push({
+        id: `email-${email.id}`,
+        type: 'email_queued',
+        timestamp: email.scheduledAt.toISOString(),
+        title: `Step ${email.stepNumber} queued`,
+        description: `Scheduled for ${new Date(email.scheduledAt).toLocaleString()}`,
+      })
+    } else if (email.status === 'failed') {
+      timeline.push({
+        id: `email-${email.id}`,
+        type: 'email_failed',
+        timestamp: (email.sentAt || email.scheduledAt).toISOString(),
+        title: `Step ${email.stepNumber} failed`,
+        description: email.lastError || 'Unknown error',
+      })
+    }
+  }
+
+  for (const reply of replies) {
+    timeline.push({
+      id: `reply-${reply.id}`,
+      type: 'reply',
+      timestamp: reply.receivedAt.toISOString(),
+      title: `Reply received${reply.sentiment ? ` · ${reply.sentiment}` : ''}`,
+      description: reply.subject,
+      metadata: {
+        from: reply.fromEmail,
+        subject: reply.subject,
+        body: reply.body,
+        sentiment: reply.sentiment,
+      },
+    })
+  }
+
+  // Sort by timestamp descending (most recent first)
+  timeline.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+
+  // Summary stats
+  const stats = {
+    totalEmails: emails.length,
+    sentEmails: emails.filter((e) => e.status === 'sent').length,
+    queuedEmails: emails.filter((e) => e.status === 'queued').length,
+    failedEmails: emails.filter((e) => e.status === 'failed').length,
+    totalOpens: emails.reduce((sum, e) => sum + e.openCount, 0),
+    totalClicks: emails.reduce((sum, e) => sum + e.clickCount, 0),
+    totalReplies: replies.length,
+  }
+
+  return c.json({ lead, timeline, stats })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // UNSUBSCRIBE — public endpoint for /u/:leadId link in email footers
 // ─────────────────────────────────────────────────────────────────────────────
 

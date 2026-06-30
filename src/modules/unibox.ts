@@ -1,5 +1,6 @@
 import { db } from '../lib/db'
 import { fetchUnreadMessages, markMessageRead } from '../lib/imap'
+import { pushNotification } from '../lib/notifications'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // UNIBOX INBOUND POLLER — fetch replies from all accounts, match to leads,
@@ -116,6 +117,15 @@ export async function processInboundReplies(): Promise<{
 
         newReplies++
 
+        // Push notification for new reply
+        const sentimentLabel = sentiment ? ` · ${sentiment}` : ''
+        await pushNotification({
+          type: 'reply',
+          severity: sentiment === 'interested' ? 'success' : sentiment === 'unsubscribe' ? 'warning' : 'info',
+          title: `New reply${sentimentLabel}`,
+          message: `${msg.from} replied: "${msg.subject?.slice(0, 60) || '(no subject)'}"`,
+        }).catch(() => {})
+
         // Mark IMAP message as read
         await markMessageRead(account, msg.folder, msg.uid)
 
@@ -160,6 +170,12 @@ export async function processInboundReplies(): Promise<{
             data: { status: 'cancelled' },
           })
           suppressed++
+          await pushNotification({
+            type: 'unsubscribe',
+            severity: 'warning',
+            title: 'Unsubscribe request',
+            message: `${lead.email} unsubscribed. Added to suppression list.`,
+          }).catch(() => {})
         }
 
         // ─── BOUNCE → SUPPRESS + MARK EMAIL INVALID ───
@@ -178,6 +194,12 @@ export async function processInboundReplies(): Promise<{
             data: { status: 'cancelled' },
           })
           suppressed++
+          await pushNotification({
+            type: 'bounce',
+            severity: 'warning',
+            title: 'Email bounced',
+            message: `${lead.email} — ${msg.subject?.slice(0, 40) || 'delivery failed'}. Lead auto-suppressed.`,
+          }).catch(() => {})
         }
 
         // Log inbound
