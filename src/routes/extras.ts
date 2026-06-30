@@ -1134,4 +1134,18 @@ app.put('/notification-prefs', async (c) => {
   return c.json({ ok: true, prefs: updated })
 })
 
+// POST /api/extras/notification-prefs/test — send a test notification
+app.post('/notification-prefs/test', async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const eventType = body.eventType || 'system'
+  const { pushNotification } = await import('../lib/notifications')
+  await pushNotification({
+    type: eventType as any,
+    severity: 'info',
+    title: '🧪 Test notification',
+    message: `This is a test ${eventType} notification. If you see this in your notification bell and/or Slack/Discord, your configuration is working correctly.`,
+  }).catch(() => {})
+  return c.json({ ok: true, message: 'Test notification sent' })
+})
+
 export default app
