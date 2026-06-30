@@ -203,6 +203,12 @@ export async function pushNotification(params: {
   message: string
 }): Promise<void> {
   try {
+    // Check preferences — if this event type is explicitly disabled, skip entirely
+    const prefs = await loadPrefs()
+    if (prefs[params.type] === false) {
+      return // notification type disabled by user
+    }
+
     const notifs = await loadNotifications()
     const newNotif: Notification = {
       id: `notif_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
@@ -226,4 +232,56 @@ export async function pushNotification(params: {
 // Invalidate webhook cache (call after settings update)
 export function invalidateWebhookCache() {
   webhookCache = null
+}
+
+// ─── Notification Preferences ─────────────────────────────────────────
+// Stored in Setting table as JSON (key: 'notification_prefs')
+// Maps event type → boolean (enabled/disabled)
+interface NotificationPrefs {
+  reply?: boolean
+  bounce?: boolean
+  unsubscribe?: boolean
+  failure?: boolean
+  warmup?: boolean
+  system?: boolean
+}
+
+let prefsCache: NotificationPrefs | null = null
+
+async function loadPrefs(): Promise<NotificationPrefs> {
+  if (prefsCache) return prefsCache
+  try {
+    const setting = await db.setting.findUnique({ where: { key: 'notification_prefs' } })
+    if (!setting) return {}
+    prefsCache = JSON.parse(setting.value)
+    return prefsCache!
+  } catch {
+    return {}
+  }
+}
+
+async function savePrefs(prefs: NotificationPrefs) {
+  prefsCache = prefs
+  try {
+    await db.setting.upsert({
+      where: { key: 'notification_prefs' },
+      create: { key: 'notification_prefs', value: JSON.stringify(prefs) },
+      update: { value: JSON.stringify(prefs) },
+    })
+  } catch (e: any) {
+    console.error('[notifications] prefs persist failed:', e?.message)
+  }
+}
+
+export async function getNotificationPrefs(): Promise<NotificationPrefs> {
+  return loadPrefs()
+}
+
+export async function setNotificationPrefs(prefs: NotificationPrefs): Promise<NotificationPrefs> {
+  await savePrefs(prefs)
+  return prefs
+}
+
+export function invalidatePrefsCache() {
+  prefsCache = null
 }

@@ -1099,4 +1099,39 @@ app.get('/webhooks/deliveries', async (c) => {
   })
 })
 
+// ─────────────────────────────────────────────────────────────────────────────
+// NOTIFICATION PREFERENCES — per-event-type enable/disable
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.get('/notification-prefs', async (c) => {
+  const { getNotificationPrefs } = await import('../lib/notifications')
+  const prefs = await getNotificationPrefs()
+  // Return with defaults for all event types
+  const eventTypes = [
+    { type: 'reply', label: 'New replies', description: 'When a lead replies to your email', default: true },
+    { type: 'bounce', label: 'Email bounces', description: 'When an email fails to deliver', default: true },
+    { type: 'unsubscribe', label: 'Unsubscribes', description: 'When a lead unsubscribes', default: true },
+    { type: 'failure', label: 'SMTP failures', description: 'When a sending account auto-pauses after 3 errors', default: true },
+    { type: 'warmup', label: 'Warm-up milestones', description: 'When an account reaches fully-warmed state', default: true },
+    { type: 'system', label: 'System alerts', description: 'General system notifications', default: true },
+  ]
+  return c.json({
+    prefs,
+    eventTypes: eventTypes.map((e) => ({
+      ...e,
+      enabled: prefs[e.type as keyof typeof prefs] !== false ? true : false,
+    })),
+  })
+})
+
+app.put('/notification-prefs', async (c) => {
+  const body = await c.req.json()
+  const { getNotificationPrefs, setNotificationPrefs, invalidatePrefsCache } = await import('../lib/notifications')
+  const current = await getNotificationPrefs()
+  const updated = { ...current, ...body }
+  await setNotificationPrefs(updated)
+  invalidatePrefsCache()
+  return c.json({ ok: true, prefs: updated })
+})
+
 export default app
