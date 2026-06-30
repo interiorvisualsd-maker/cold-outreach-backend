@@ -1,13 +1,13 @@
 // Lead Dispatcher — Prisma schema
-// Production: PostgreSQL (Neon)
-// For local dev with SQLite: change provider to "sqlite" and use a file:// DATABASE_URL
+// Portable: SQLite (sandbox) → Postgres (Neon production)
+// To switch to Postgres: change provider to "postgresql" and DATABASE_URL to postgres connection string
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
@@ -164,12 +164,19 @@ model ScheduledEmail {
   attempts      Int      @default(0)
   lastError     String?
   messageId     String? // SMTP Message-ID for threading
+  // Open/click tracking
+  trackingId    String?  @unique // random token for tracking pixel + link wrapping
+  openedAt      DateTime?
+  openCount     Int      @default(0)
+  clickedAt     DateTime?
+  clickCount    Int      @default(0)
   createdAt     DateTime @default(now())
 
   @@index([status, scheduledAt])
   @@index([campaignId])
   @@index([leadId])
   @@index([smtpAccountId])
+  @@index([trackingId])
 }
 
 model EmailLog {

@@ -1,8 +1,13 @@
-// Standalone entry — runs the backend API server (Cloud Run).
-// The background worker runs SEPARATELY as a Cloud Run Job (see worker-job.ts).
-// Do NOT start the worker here — Cloud Run instances are ephemeral and scale to zero.
+// Standalone entry — runs the backend as a Bun server on port 3001.
+// Used in production (Cloud Run) and for local development testing.
+// In the sandbox, the backend runs INSIDE the Next.js process via
+// src/app/api/[...path]/route.ts — this file is not used there.
 import app from './app'
+import { startWorker } from './worker'
 
 const PORT = parseInt(process.env.PORT || '3001')
-console.log(`🚀 Lead Dispatcher backend API running on port ${PORT}`)
+console.log(`🚀 Lead Dispatcher backend running on http://localhost:${PORT}`)
 Bun.serve({ fetch: app.fetch, port: PORT })
+
+// Start the background worker (send queue, warmup, IMAP polling)
+startWorker()

@@ -8,6 +8,8 @@ import csvRoutes from './routes/csv'
 import dispatcherRoutes from './routes/dispatcher'
 import warmupRoutes from './routes/warmup'
 import uniboxRoutes from './routes/unibox'
+import extrasRoutes from './routes/extras'
+import exportsRoutes from './routes/exports'
 
 // ─── Process-level crash protection ───
 process.on('uncaughtException', (err) => {
@@ -37,6 +39,61 @@ app.get('/api/health', (c) => c.json({ ok: true, service: 'lead-dispatcher-backe
 // Public auth routes (login, register) — no token required
 app.route('/api/auth', authRoutes)
 
+// Public tracking routes (email clients fetch these — no auth)
+// GET /api/extras/t/o/:trackingId — open tracking pixel (1x1 GIF)
+// GET /api/extras/t/c/:trackingId?url=... — click redirect
+app.get('/api/extras/t/o/:trackingId', async (c) => {
+  const { default: exportsRoutes } = await import('./routes/exports')
+  // Delegate to the exports route handler — but it's defined as a sub-app.
+  // Simpler: handle inline here.
+  const { db } = await import('./lib/db')
+  const trackingId = c.req.param('trackingId')
+  try {
+    const email = await db.scheduledEmail.findUnique({ where: { trackingId } })
+    if (email) {
+      await db.scheduledEmail.update({
+        where: { id: email.id },
+        data: {
+          openCount: { increment: 1 },
+          openedAt: email.openedAt || new Date(),
+        },
+      })
+    }
+  } catch (e: any) {
+    console.error('[tracking] open error:', e?.message)
+  }
+  const gif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64')
+  return new Response(gif, {
+    headers: {
+      'Content-Type': 'image/gif',
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0',
+    },
+  })
+})
+app.get('/api/extras/t/c/:trackingId', async (c) => {
+  const { db } = await import('./lib/db')
+  const trackingId = c.req.param('trackingId')
+  const url = c.req.query('url')
+  if (!url) return c.json({ error: 'url query param required' }, 400)
+  try {
+    const email = await db.scheduledEmail.findUnique({ where: { trackingId } })
+    if (email) {
+      await db.scheduledEmail.update({
+        where: { id: email.id },
+        data: {
+          clickCount: { increment: 1 },
+          clickedAt: email.clickedAt || new Date(),
+        },
+      })
+    }
+  } catch (e: any) {
+    console.error('[tracking] click error:', e?.message)
+  }
+  return c.redirect(url)
+})
+
 // Protected routes — require Bearer token
 const protectedApi = new Hono()
 protectedApi.use('*', authMiddleware)
@@ -46,6 +103,8 @@ protectedApi.route('/csv', csvRoutes)
 protectedApi.route('/dispatcher', dispatcherRoutes)
 protectedApi.route('/warmup', warmupRoutes)
 protectedApi.route('/unibox', uniboxRoutes)
+protectedApi.route('/extras', extrasRoutes)
+protectedApi.route('/exports', exportsRoutes)
 app.route('/api', protectedApi)
 
 // 404

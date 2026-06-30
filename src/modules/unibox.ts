@@ -1,6 +1,5 @@
 import { db } from '../lib/db'
 import { fetchUnreadMessages, markMessageRead } from '../lib/imap'
-import { tagReplySentiment, isLlmEnabled, type ReplySentiment } from '../lib/llm'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // UNIBOX INBOUND POLLER — fetch replies from all accounts, match to leads,
@@ -83,36 +82,25 @@ export async function processInboundReplies(): Promise<{
 
         const replyType = detectReplyType(msg.subject, msg.text)
 
-        if (!lead) {
-          // Unmatched inbound (no lead found for this sender) — log and skip
-          await db.emailLog.create({
-            data: {
-              direction: 'inbound',
-              smtpAccountId: account.id,
-              toEmail: account.emailAddress,
-              fromEmail: msg.from,
-              subject: msg.subject,
-              body: msg.text,
-              messageId: msg.messageId,
-              inReplyTo: msg.inReplyTo,
-              isReply: true,
-              receivedAt: msg.date,
-            },
-          }).catch(() => null)
-          await markMessageRead(account, msg.folder, msg.uid)
-          continue
-        }
-
-        // LLM sentiment tagging (DeepSeek) — only for 'normal' replies,
-        // pattern-detected types (unsubscribe/bounce/ooo) are already classified.
-        let sentiment: string | null = replyType === 'normal' ? null : replyType
-        if (replyType === 'normal' && isLlmEnabled()) {
-          const llmSentiment = await tagReplySentiment(msg.from, msg.subject, msg.text)
-          if (llmSentiment) sentiment = llmSentiment
-        }
-
-        // Create Reply record
+        // Create Reply record (linked to lead if found)
         const reply = await db.reply.create({
+          data: {
+            leadId: lead?.id || 'unknown', // will skip if no lead
+            fromEmail: msg.from,
+            toEmail: account.emailAddress,
+            subject: msg.subject,
+            body: msg.text,
+            messageId: msg.messageId,
+            inReplyTo: msg.inReplyTo,
+            receivedAt: msg.date,
+            sentiment: replyType === 'normal' ? null : replyType,
+          },
+        }).catch(() => null)
+
+        if (!lead) continue // unmatched inbound — logged but no sequence to break
+
+        // Re-create reply with proper leadId
+        await db.reply.create({
           data: {
             leadId: lead.id,
             fromEmail: msg.from,
@@ -122,7 +110,7 @@ export async function processInboundReplies(): Promise<{
             messageId: msg.messageId,
             inReplyTo: msg.inReplyTo,
             receivedAt: msg.date,
-            sentiment,
+            sentiment: replyType === 'normal' ? null : replyType,
           },
         }).catch(() => null)
 
@@ -132,14 +120,7 @@ export async function processInboundReplies(): Promise<{
         await markMessageRead(account, msg.folder, msg.uid)
 
         // ─── SEQUENCE BREAKER ───
-        // Break sequence on normal replies, OOO, or LLM-tagged "interested"/"not_interested"
-        const shouldBreakSequence =
-          replyType === 'ooo' ||
-          replyType === 'normal' ||
-          sentiment === 'interested' ||
-          sentiment === 'not_interested'
-
-        if (shouldBreakSequence) {
+        if (replyType === 'normal' || replyType === 'ooo') {
           // Cancel all pending follow-ups for this lead
           const cancelled = await db.scheduledEmail.updateMany({
             where: {
@@ -151,7 +132,7 @@ export async function processInboundReplies(): Promise<{
           })
           if (cancelled.count > 0) sequencesBroken++
 
-          if (replyType === 'normal' || sentiment === 'interested' || sentiment === 'not_interested') {
+          if (replyType === 'normal') {
             // Mark lead as replied
             await db.lead.update({
               where: { id: lead.id },
@@ -159,11 +140,11 @@ export async function processInboundReplies(): Promise<{
             })
           }
           // OOO: keep lead in current state (don't mark replied), but follow-ups are cancelled.
+          // A future enhancement could re-schedule after the detected return date.
         }
 
         // ─── UNSUBSCRIBE → SUPPRESS ───
-        // Triggered by pattern detection OR LLM sentiment classification
-        if (replyType === 'unsubscribe' || sentiment === 'unsubscribe') {
+        if (replyType === 'unsubscribe') {
           await db.suppressionList.upsert({
             where: { email_reason: { email: lead.email.toLowerCase(), reason: 'unsubscribe' } },
             create: { email: lead.email.toLowerCase(), reason: 'unsubscribe', source: lead.campaign?.name },

@@ -26,8 +26,8 @@ app.get('/stats', async (c) => {
   today.setHours(0, 0, 0, 0)
   const [sentToday, completedToday, failedToday, rescuedToday] = await Promise.all([
     db.warmupMessage.count({ where: { sentAt: { gte: today }, status: { in: ['sent', 'received', 'rescued', 'replied', 'completed'] } } }),
-    db.warmupMessage.count({ where: { completedAt: { gte: today } } }),
-    db.warmupMessage.count({ where: { status: 'failed', updatedAt: { gte: today } } }),
+    db.warmupMessage.count({ where: { status: 'completed', repliedAt: { gte: today } } }),
+    db.warmupMessage.count({ where: { status: 'failed', sentAt: { gte: today } } }),
     db.warmupMessage.count({ where: { rescuedAt: { gte: today } } }),
   ])
 

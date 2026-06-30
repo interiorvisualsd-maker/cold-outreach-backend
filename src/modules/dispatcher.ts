@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import { db } from '../lib/db'
 import { sendMail } from '../lib/smtp'
 import { clearTransportCache } from '../lib/smtp'
@@ -119,22 +120,39 @@ export async function processSendBatch(batchSize = 50): Promise<{
     })
 
     try {
-      // Append unsubscribe footer (CAN-SPAM compliance)
-      const unsubLink = `https://${process.env.PUBLIC_BASE_URL || 'localhost'}/u/${item.leadId}`
+      // Generate tracking ID for open/click tracking (if not already set)
+      let trackingId = item.trackingId
+      if (!trackingId) {
+        trackingId = crypto.randomBytes(16).toString('hex')
+      }
+      const baseUrl = process.env.PUBLIC_BASE_URL || 'localhost'
+      const protocol = baseUrl.startsWith('localhost') ? 'http' : 'https'
+      // Open tracking pixel (1x1 transparent GIF)
+      const pixelUrl = `${protocol}://${baseUrl}/api/extras/t/o/${trackingId}`
+      // Unsubscribe link (CAN-SPAM)
+      const unsubLink = `${protocol}://${baseUrl}/u/${item.leadId}`
+      // Wrap any URLs in the body with click tracking
+      const wrappedBody = item.body.replace(
+        /(https?:\/\/[^\s<>"']+)/g,
+        (match) => `${protocol}://${baseUrl}/api/extras/t/c/${trackingId}?url=${encodeURIComponent(match)}`
+      )
       const footer = `\n\n---\nTo unsubscribe, reply with "unsubscribe" or visit ${unsubLink}`
-      const bodyWithFooter = item.body + footer
+      const textBody = wrappedBody + footer
+      // HTML body with tracking pixel
+      const htmlBody = `${wrappedBody.replace(/\n/g, '<br>\n')}<br><br>---<br>To unsubscribe, reply with "unsubscribe" or <a href="${unsubLink}">click here</a>.<img src="${pixelUrl}" width="1" height="1" alt="" style="display:none">`
 
       const { messageId } = await sendMail(account, {
         to: item.lead.email,
         subject: item.subject,
-        text: bodyWithFooter,
+        text: textBody,
+        html: htmlBody,
         fromName: item.campaign.fromNameOverride || account.fromName,
       })
 
-      // Success — update everything
+      // Success — update everything (including trackingId)
       await db.scheduledEmail.update({
         where: { id: item.id },
-        data: { status: 'sent', sentAt: now, messageId },
+        data: { status: 'sent', sentAt: now, messageId, trackingId },
       })
       await db.smtpAccount.update({
         where: { id: account.id },

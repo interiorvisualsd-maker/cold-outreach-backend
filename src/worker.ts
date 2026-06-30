@@ -47,9 +47,9 @@ function runWorker() {
     }
   }
 
-  // Run worker every 2 minutes
-  setInterval(workerTick, 2 * 60 * 1000)
-  // First tick after 30s startup (give the server time to settle)
-  setTimeout(workerTick, 30000)
-  console.log('[worker] Background worker started (tick every 2 min, first tick in 30s)')
+  // Run worker every 5 minutes (was 2 min — reduced frequency to avoid process crashes)
+  setInterval(workerTick, 5 * 60 * 1000)
+  // First tick after 2 minutes startup (was 30s — give server more time to settle)
+  setTimeout(workerTick, 2 * 60 * 1000)
+  console.log('[worker] Background worker started (tick every 5 min, first tick in 2 min)')
 }
