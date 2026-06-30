@@ -1,0 +1,911 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Lead Dispatcher — Setup Guide</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+@page {
+    size: 720px 1020px;
+    margin: 0;
+}
+:root {
+    --c-bg: #ffffff;
+    --c-text: #1e293b;
+    --c-muted: #64748b;
+    --c-light: #f1f5f9;
+    --c-violet: #5856d6;
+    --c-violet-light: #ede9fe;
+    --c-emerald: #059669;
+    --c-amber: #d97706;
+    --c-rose: #dc2626;
+    --c-border: #e2e8f0;
+}
+html, body {
+    margin: 0;
+    padding: 0;
+    width: 720px;
+    background: var(--c-bg);
+    color: var(--c-text);
+    font-family: 'Inter', -apple-system, sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+}
+@media screen {
+    html {
+        height: auto;
+        display: flex;
+        justify-content: center;
+        background: #e2e8f0;
+    }
+    body {
+        margin: 20px auto;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+    }
+}
+
+/* ─── Cover Page ─── */
+.cover {
+    width: 720px;
+    height: 1020px;
+    box-sizing: border-box;
+    break-after: page;
+    overflow: hidden;
+    background: linear-gradient(135deg, #5856d6 0%, #6366f1 50%, #7c3aed 100%);
+    color: white;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding: 70px;
+    position: relative;
+}
+.cover::before {
+    content: '';
+    position: absolute;
+    top: -100px;
+    right: -100px;
+    width: 400px;
+    height: 400px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.08);
+}
+.cover::after {
+    content: '';
+    position: absolute;
+    bottom: -80px;
+    left: -80px;
+    width: 300px;
+    height: 300px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.06);
+}
+.cover-logo {
+    width: 64px;
+    height: 64px;
+    background: rgba(255,255,255,0.2);
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+    margin-bottom: 32px;
+    backdrop-filter: blur(10px);
+}
+.cover-badge {
+    background: rgba(255,255,255,0.15);
+    padding: 6px 16px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 24px;
+    backdrop-filter: blur(10px);
+}
+.cover-title {
+    font-size: 42px;
+    font-weight: 800;
+    text-align: center;
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+    margin-bottom: 16px;
+}
+.cover-subtitle {
+    font-size: 18px;
+    font-weight: 400;
+    text-align: center;
+    color: rgba(255,255,255,0.8);
+    max-width: 480px;
+    line-height: 1.5;
+    margin-bottom: 48px;
+}
+.cover-features {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-bottom: 48px;
+}
+.cover-feature {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 15px;
+    font-weight: 500;
+}
+.cover-feature-icon {
+    width: 24px;
+    height: 24px;
+    background: rgba(255,255,255,0.2);
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    flex-shrink: 0;
+}
+.cover-footer {
+    position: absolute;
+    bottom: 40px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-size: 13px;
+    color: rgba(255,255,255,0.6);
+}
+
+/* ─── Main Content ─── */
+.main-content {
+    padding: 50px 55px 40px 55px;
+}
+
+/* ─── Chapter Headers ─── */
+.chapter-header {
+    break-after: avoid;
+    break-inside: avoid;
+    margin-top: 28px;
+}
+.chapter-header:first-child {
+    margin-top: 0;
+}
+.chapter-tag {
+    display: inline-block;
+    background: var(--c-violet-light);
+    color: var(--c-violet);
+    font-size: 11px;
+    font-weight: 700;
+    padding: 4px 10px;
+    border-radius: 6px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+}
+.chapter-title {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--c-text);
+    margin-bottom: 6px;
+    letter-spacing: -0.01em;
+}
+.chapter-subtitle {
+    font-size: 13px;
+    color: var(--c-muted);
+    margin-bottom: 12px;
+}
+.divider {
+    height: 3px;
+    width: 40px;
+    background: var(--c-violet);
+    border-radius: 2px;
+    margin-bottom: 16px;
+}
+
+/* ─── Body Text ─── */
+.body-text {
+    font-size: 14px;
+    line-height: 1.65;
+    color: var(--c-text);
+    margin-bottom: 12px;
+}
+.body-text strong {
+    font-weight: 600;
+    color: var(--c-text);
+}
+.muted {
+    color: var(--c-muted);
+}
+
+/* ─── Steps ─── */
+.step {
+    break-inside: avoid;
+    margin-bottom: 14px;
+    padding-left: 28px;
+    position: relative;
+}
+.step-num {
+    position: absolute;
+    left: 0;
+    top: 1px;
+    width: 20px;
+    height: 20px;
+    background: var(--c-violet);
+    color: white;
+    border-radius: 50%;
+    font-size: 11px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.step-content {
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--c-text);
+}
+.step-content strong {
+    font-weight: 600;
+}
+
+/* ─── Cards / Callouts ─── */
+.callout {
+    break-inside: avoid;
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 14px;
+    font-size: 13px;
+    line-height: 1.55;
+}
+.callout-warn {
+    background: #fff7ed;
+    border: 1px solid #fed7aa;
+    color: #9a3412;
+}
+.callout-warn strong { color: #7c2d12; }
+.callout-info {
+    background: var(--c-violet-light);
+    border: 1px solid #ddd6fe;
+    color: #5b21b6;
+}
+.callout-info strong { color: #4c1d95; }
+.callout-tip {
+    background: #ecfdf5;
+    border: 1px solid #a7f3d0;
+    color: #065f46;
+}
+.callout-tip strong { color: #064e3b; }
+.callout-icon {
+    font-weight: 700;
+    margin-right: 6px;
+}
+
+/* ─── Tables ─── */
+.env-table {
+    break-inside: avoid;
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 14px;
+    font-size: 13px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--c-border);
+}
+.env-table th {
+    background: var(--c-light);
+    padding: 8px 12px;
+    text-align: left;
+    font-weight: 600;
+    color: var(--c-text);
+    border-bottom: 1px solid var(--c-border);
+    font-size: 12px;
+}
+.env-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--c-border);
+    color: var(--c-text);
+    vertical-align: top;
+}
+.env-table td:first-child {
+    font-weight: 600;
+    color: var(--c-violet);
+    font-family: 'Inter', monospace;
+    font-size: 12px;
+    white-space: nowrap;
+}
+.env-table tr:last-child td {
+    border-bottom: none;
+}
+.env-table code {
+    background: var(--c-light);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 12px;
+    font-family: 'Inter', monospace;
+    color: var(--c-text);
+}
+
+/* ─── Code blocks ─── */
+.code-block {
+    break-inside: avoid;
+    background: #1e293b;
+    color: #e2e8f0;
+    padding: 12px 16px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-family: 'Inter', monospace;
+    line-height: 1.5;
+    margin-bottom: 14px;
+    overflow-x: auto;
+}
+.code-block code {
+    font-family: inherit;
+    white-space: pre;
+}
+
+/* ─── Quick Reference ─── */
+.ref-box {
+    break-inside: avoid;
+    background: var(--c-light);
+    border: 2px dashed var(--c-violet);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 14px;
+}
+.ref-box-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--c-violet);
+    margin-bottom: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.ref-line {
+    font-size: 13px;
+    color: var(--c-text);
+    line-height: 2;
+    font-family: 'Inter', monospace;
+}
+
+/* ─── Cost Table ─── */
+.cost-table {
+    break-inside: avoid;
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 14px;
+    font-size: 13px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--c-border);
+}
+.cost-table th {
+    background: var(--c-violet);
+    color: white;
+    padding: 8px 12px;
+    text-align: left;
+    font-weight: 600;
+    font-size: 12px;
+}
+.cost-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--c-border);
+}
+.cost-table tr:last-child td {
+    border-bottom: none;
+    font-weight: 700;
+    background: var(--c-violet-light);
+    color: var(--c-violet);
+}
+
+/* ─── Ending Page ─── */
+.ending {
+    width: 720px;
+    height: 1020px;
+    box-sizing: border-box;
+    break-before: page;
+    overflow: hidden;
+    background: linear-gradient(135deg, #5856d6 0%, #6366f1 50%, #7c3aed 100%);
+    color: white;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding: 70px;
+    text-align: center;
+    position: relative;
+}
+.ending::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 500px;
+    height: 500px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.05);
+}
+.ending-icon {
+    font-size: 48px;
+    margin-bottom: 24px;
+}
+.ending-title {
+    font-size: 36px;
+    font-weight: 800;
+    margin-bottom: 16px;
+    letter-spacing: -0.02em;
+}
+.ending-subtitle {
+    font-size: 17px;
+    color: rgba(255,255,255,0.8);
+    max-width: 460px;
+    line-height: 1.5;
+    margin-bottom: 40px;
+}
+.ending-links {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    font-size: 14px;
+}
+.ending-link {
+    background: rgba(255,255,255,0.15);
+    padding: 10px 20px;
+    border-radius: 8px;
+    backdrop-filter: blur(10px);
+    font-weight: 500;
+}
+.ending-footer {
+    position: absolute;
+    bottom: 40px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-size: 13px;
+    color: rgba(255,255,255,0.5);
+}
+</style>
+</head>
+<body>
+
+<!-- ═══ COVER PAGE ═══ -->
+<div class="cover">
+    <div class="cover-logo">⚡</div>
+    <div class="cover-badge">No Terminal Required</div>
+    <div class="cover-title">Lead Dispatcher<br>Setup Guide</div>
+    <div class="cover-subtitle">A complete, step-by-step guide to deploying your own cold email automation platform — using only website interfaces.</div>
+    <div class="cover-features">
+        <div class="cover-feature"><div class="cover-feature-icon">✓</div> Zero command line — 100% web UI</div>
+        <div class="cover-feature"><div class="cover-feature-icon">✓</div> Free hosting on Vercel + Google Cloud + Neon</div>
+        <div class="cover-feature"><div class="cover-feature-icon">✓</div> Setup in 30–45 minutes</div>
+        <div class="cover-feature"><div class="cover-feature-icon">✓</div> Written for non-technical users</div>
+    </div>
+    <div class="cover-footer">Lead Dispatcher · Private Cold Email Automation</div>
+</div>
+
+<!-- ═══ MAIN CONTENT ═══ -->
+<div class="main-content">
+
+<!-- ─── INTRO ─── -->
+<div class="chapter-header">
+    <div class="chapter-tag">Before You Start</div>
+    <div class="chapter-title">What You Need</div>
+    <div class="divider"></div>
+</div>
+<div class="body-text">This guide walks you through setting up your cold email automation app from scratch. You will <strong>not use the terminal or command line at all</strong>. Everything is done through websites you already know how to use.</div>
+<div class="body-text">You need three things before starting:</div>
+<div class="step"><div class="step-num">1</div><div class="step-content">A <strong>Google account</strong> (Gmail works perfectly)</div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Your <strong>GitHub repos</strong> (already created for you):<br>• Frontend: github.com/interiorvisualsd-maker/cold-outreach-frontend<br>• Backend: github.com/interiorvisualsd-maker/cold-outreach-backend</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content"><strong>30–45 minutes</strong> of focused time</div></div>
+
+<div class="callout callout-info">
+    <span class="callout-icon">💡</span> <strong>How to think about it:</strong> You're setting up three websites that work together. Think of it like a restaurant — Neon is the pantry (stores data), Google Cloud is the kitchen (does the work), and Vercel is the dining room (where you sit and interact).
+</div>
+
+<!-- ─── STEP 1 ─── -->
+<div class="chapter-header">
+    <div class="chapter-tag">Step 1 · 5 minutes</div>
+    <div class="chapter-title">Create Your Database (Neon)</div>
+    <div class="chapter-subtitle">Neon stores all your data — leads, emails, replies, and accounts</div>
+    <div class="divider"></div>
+</div>
+<div class="step"><div class="step-num">1</div><div class="step-content">Open <strong>https://neon.tech</strong> in your browser</div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Click <strong>"Sign up"</strong> (top right corner)</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Click <strong>"Continue with Google"</strong> and pick your Google account</div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content">On the "Create your first project" page:<br>• <strong>Project name</strong>: type <code>lead-dispatcher</code><br>• <strong>Database name</strong>: leave as <code>neondb</code><br>• <strong>Region</strong>: pick the closest to you (if unsure, pick <code>US East (Ohio)</code>)<br>• <strong>Postgres version</strong>: leave default</div></div>
+<div class="step"><div class="step-num">5</div><div class="step-content">Click <strong>"Create project"</strong></div></div>
+<div class="step"><div class="step-num">6</div><div class="step-content">You'll see a page with a long connection string that looks like:<br><code>postgresql://lead_dispatcher_owner:AbCdEf@ep-cool-name.us-east-2.aws.neon.tech/neondb?sslmode=require</code></div></div>
+
+<div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span> <strong>IMPORTANT:</strong> Copy this ENTIRE link and save it somewhere safe (Notes app, password manager, etc.). You'll need it 2 more times. This is your <strong>DATABASE LINK</strong>.
+</div>
+
+<!-- ─── STEP 2 ─── -->
+<div class="chapter-header">
+    <div class="chapter-tag">Step 2 · 10 minutes</div>
+    <div class="chapter-title">Set Up Google Cloud</div>
+    <div class="chapter-subtitle">Google Cloud runs your backend — the "brain" that sends emails and checks replies</div>
+    <div class="divider"></div>
+</div>
+
+<div class="body-text"><strong>2A. Create a Google Cloud project</strong></div>
+<div class="step"><div class="step-num">1</div><div class="step-content">Open <strong>https://console.cloud.google.com</strong> and sign in with your Google account</div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">At the top, click the project dropdown (says "Select a project")</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Click <strong>"New Project"</strong> (top right of popup)</div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content"><strong>Project name</strong>: type <code>lead-dispatcher</code></div></div>
+<div class="step"><div class="step-num">5</div><div class="step-content">Click <strong>"Create"</strong></div></div>
+<div class="step"><div class="step-num">6</div><div class="step-content">Wait 10 seconds, then click the bell icon (🔔 top right) → <strong>"Select project"</strong></div></div>
+
+<div class="callout callout-tip">
+    <span class="callout-icon">✅</span> You automatically get <strong>$300 free credit</strong> valid for 90 days. You won't be charged anything.
+</div>
+
+<div class="body-text" style="margin-top:18px"><strong>2B. Turn on 4 services</strong></div>
+<div class="body-text">For each one: search the name → click the result → click <strong>"Enable"</strong></div>
+<div class="step"><div class="step-num">1</div><div class="step-content">Search <code>Cloud Run API</code> → Enable</div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Search <code>Cloud Build API</code> → Enable</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Search <code>Cloud Scheduler API</code> → Enable</div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content">Search <code>Artifact Registry API</code> → Enable</div></div>
+
+<div class="body-text" style="margin-top:18px"><strong>2C. Generate 3 secret keys</strong></div>
+<div class="body-text">Your app needs secret keys to keep passwords and data safe. Use free web tools to generate them:</div>
+
+<div class="body-text" style="margin-top:8px"><strong>CRON SECRET</strong> (for the email worker):</div>
+<div class="step"><div class="step-num">1</div><div class="step-content">Go to <strong>https://www.random.org/strings</strong></div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Set: Length = <code>32</code>, Strings = <code>1</code>, Character set = <code>Alphanumeric</code></div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Click <strong>"Get Strings"</strong> → copy the result</div></div>
+
+<div class="body-text" style="margin-top:8px"><strong>JWT SECRET + ENCRYPTION KEY</strong> (for passwords):</div>
+<div class="step"><div class="step-num">1</div><div class="step-content">Go to <strong>https://www.allkeysgenerator.com/Random/Security-Encryption-Key-Generator.aspx</strong></div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Set key size to <code>256-bit</code> and click <strong>"Generate"</strong></div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Copy the hex string — this is your <strong>JWT SECRET</strong></div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content">Click Generate again → copy — this is your <strong>ENCRYPTION KEY</strong></div></div>
+
+<div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span> Save all 3 secrets somewhere safe. You'll need them in the next step.
+</div>
+
+<!-- ─── STEP 3 ─── -->
+<div class="chapter-header">
+    <div class="chapter-tag">Step 3 · 15 minutes</div>
+    <div class="chapter-title">Deploy Your Backend</div>
+    <div class="chapter-subtitle">This puts your backend code on Google's servers so it can send emails</div>
+    <div class="divider"></div>
+</div>
+
+<div class="body-text"><strong>3A. Open Cloud Run</strong></div>
+<div class="step"><div class="step-num">1</div><div class="step-content">In Google Cloud Console, search <code>Cloud Run</code> → click it</div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Click <strong>"Create Service"</strong> (or "Deploy to Cloud Run")</div></div>
+
+<div class="body-text" style="margin-top:12px"><strong>3B. Connect your GitHub repo</strong></div>
+<div class="step"><div class="step-num">1</div><div class="step-content">Under <strong>"Source"</strong>, select <strong>"Deploy from source"</strong></div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Click <strong>"Connect to GitHub"</strong> (or "Set up with Cloud Build")</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Authorize Google Cloud Build to access your GitHub</div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content">Select your GitHub account</div></div>
+<div class="step"><div class="step-num">5</div><div class="step-content">Find and select <strong>cold-outreach-backend</strong> repository</div></div>
+<div class="step"><div class="step-num">6</div><div class="step-content">Click <strong>"Next"</strong></div></div>
+
+<div class="body-text" style="margin-top:12px"><strong>3C. Configure the build</strong></div>
+<div class="step"><div class="step-num">1</div><div class="step-content"><strong>Branch</strong>: <code>main</code></div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content"><strong>Build type</strong>: should auto-detect the Dockerfile — leave as is</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Click <strong>"Next"</strong></div></div>
+
+<div class="body-text" style="margin-top:12px"><strong>3D. Configure the service</strong></div>
+<div class="step"><div class="step-num">1</div><div class="step-content"><strong>Service name</strong>: <code>cold-outreach-api</code></div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content"><strong>Region</strong>: <code>us-central1</code> (or closest to you)</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content"><strong>Authentication</strong>: Select <strong>"Allow unauthenticated invocations"</strong></div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content">Expand <strong>"Container, Variables & Secrets, Networking, Security"</strong>:<br>• <strong>Container port</strong>: <code>8080</code><br>• <strong>Memory</strong>: <code>512 MiB</code><br>• <strong>CPU</strong>: <code>1</code></div></div>
+<div class="step"><div class="step-num">5</div><div class="step-content">Click the <strong>"VARIABLES & SECRETS"</strong> tab → click <strong>"Add Variable"</strong> for each of these:</div></div>
+
+<table class="env-table">
+    <tr><th>Variable Name</th><th>Value</th></tr>
+    <tr><td>DATABASE_URL</td><td>Paste your DATABASE LINK from Step 1</td></tr>
+    <tr><td>JWT_SECRET</td><td>Paste your JWT SECRET from Step 2C</td></tr>
+    <tr><td>ENCRYPTION_KEY</td><td>Paste your ENCRYPTION KEY from Step 2C</td></tr>
+    <tr><td>CRON_SECRET</td><td>Paste your CRON SECRET from Step 2C</td></tr>
+    <tr><td>FRONTEND_URL</td><td>https://cold-outreach-frontend.vercel.app<br><span class="muted">(we'll fix this later)</span></td></tr>
+    <tr><td>PUBLIC_BASE_URL</td><td>https://cold-outreach-frontend.vercel.app<br><span class="muted">(same as above)</span></td></tr>
+</table>
+
+<div class="step"><div class="step-num">6</div><div class="step-content">Under <strong>"Autoscaling"</strong>:<br>• <strong>Minimum instances</strong>: <code>0</code> (saves money — scales to zero when idle)<br>• <strong>Maximum instances</strong>: <code>3</code></div></div>
+<div class="step"><div class="step-num">7</div><div class="step-content">Click <strong>"Create"</strong> or <strong>"Deploy"</strong></div></div>
+
+<div class="callout callout-info">
+    <span class="callout-icon">⏳</span> Google will build your code (takes 3–5 minutes). You'll see a log stream — don't worry, just wait. When done, you'll see a green checkmark ✅
+</div>
+
+<div class="body-text" style="margin-top:14px"><strong>3E. Copy your Backend URL</strong></div>
+<div class="body-text">At the top of the page, you'll see a URL like:</div>
+<div class="code-block"><code>https://cold-outreach-api-1234567-uc.a.run.app</code></div>
+
+<div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span> <strong>Copy this URL!</strong> This is your <strong>BACKEND URL</strong>. You'll need it in Steps 4 and 6.
+</div>
+
+<!-- ─── STEP 4 ─── -->
+<div class="chapter-header">
+    <div class="chapter-tag">Step 4 · 5 minutes</div>
+    <div class="chapter-title">Set Up the Email Worker</div>
+    <div class="chapter-subtitle">Makes your app check every 5 minutes for emails to send and replies to process</div>
+    <div class="divider"></div>
+</div>
+
+<div class="body-text"><strong>4A. Create a Cloud Scheduler job</strong></div>
+<div class="step"><div class="step-num">1</div><div class="step-content">In Google Cloud Console, search <code>Cloud Scheduler</code> → click it</div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Click <strong>"Create Job"</strong></div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Fill in:<br>• <strong>Name</strong>: <code>lead-dispatcher-worker</code><br>• <strong>Description</strong>: <code>Sends emails and checks replies every 5 minutes</code><br>• <strong>Frequency</strong>: type <code>*/5 * * * *</code> (this means "every 5 minutes")<br>• <strong>Timezone</strong>: pick your timezone</div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content">Click <strong>"Continue"</strong></div></div>
+<div class="step"><div class="step-num">5</div><div class="step-content">Under <strong>"Configure the execution"</strong>:<br>• <strong>Target type</strong>: select <strong>"HTTP"</strong><br>• <strong>URL</strong>: type your backend URL + <code>/api/cron/</code> + your CRON SECRET<br>&nbsp;&nbsp;Example: <code>https://cold-outreach-api-1234567-uc.a.run.app/api/cron/AbCdEf123456</code><br>&nbsp;&nbsp;(Replace with your actual BACKEND URL and CRON SECRET)<br>• <strong>HTTP method</strong>: <strong>POST</strong><br>• <strong>Headers</strong>: click "Add header" → Key: <code>Content-Type</code>, Value: <code>application/json</code><br>• <strong>Body</strong>: type <code>{}</code></div></div>
+<div class="step"><div class="step-num">6</div><div class="step-content">Click <strong>"Create"</strong></div></div>
+
+<div class="body-text" style="margin-top:14px"><strong>4B. Test it</strong></div>
+<div class="step"><div class="step-num">1</div><div class="step-content">You'll see your job in the list</div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Click the <strong>three dots</strong> (⋮) on the right → <strong>"Run now"</strong></div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Wait 10 seconds, then check "Last run result" — should say "Success" ✅</div></div>
+
+<div class="callout callout-tip">
+    <span class="callout-icon">💡</span> If it fails, check: Is the URL correct? (should end with <code>/api/cron/YOUR_SECRET</code>). Is the method POST? Did you include the CRON_SECRET in the URL?
+</div>
+
+<!-- ─── STEP 5 ─── -->
+<div class="chapter-header">
+    <div class="chapter-tag">Step 5 · 5 minutes</div>
+    <div class="chapter-title">Deploy Your Website (Vercel)</div>
+    <div class="chapter-subtitle">This is the actual website you'll log into to manage your campaigns</div>
+    <div class="divider"></div>
+</div>
+
+<div class="body-text"><strong>5A. Import to Vercel</strong></div>
+<div class="step"><div class="step-num">1</div><div class="step-content">Open <strong>https://vercel.com</strong></div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Click <strong>"Sign Up"</strong> (top right)</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Click <strong>"Continue with GitHub"</strong></div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content">Authorize Vercel to access your GitHub</div></div>
+
+<div class="body-text" style="margin-top:12px"><strong>5B. Import your repo</strong></div>
+<div class="step"><div class="step-num">1</div><div class="step-content">Click <strong>"Add New..."</strong> → <strong>"Project"</strong></div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Find <code>cold-outreach-frontend</code> in the list</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Click <strong>"Import"</strong></div></div>
+
+<div class="body-text" style="margin-top:12px"><strong>5C. Configure</strong></div>
+<div class="step"><div class="step-num">1</div><div class="step-content"><strong>Framework Preset</strong>: should auto-detect "Next.js" ✅</div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Don't touch Build/Output settings</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content"><strong>IMPORTANT</strong> — expand <strong>"Environment Variables"</strong> and click "Add":</div></div>
+
+<table class="env-table">
+    <tr><th>Name</th><th>Value</th></tr>
+    <tr><td>NEXT_PUBLIC_API_URL</td><td>Paste your BACKEND URL from Step 3E<br>(like https://cold-outreach-api-1234567-uc.a.run.app)</td></tr>
+</table>
+
+<div class="step"><div class="step-num">4</div><div class="step-content">Click <strong>"Deploy"</strong></div></div>
+
+<div class="body-text" style="margin-top:12px"><strong>5D. Wait + copy URL</strong></div>
+<div class="step"><div class="step-num">1</div><div class="step-content">Watch the cool animation (takes 2–3 minutes)</div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">When done, you'll see confetti 🎉</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Click <strong>"Visit"</strong> to see your live site</div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content">Your URL looks like: <code>https://cold-outreach-frontend-abc123.vercel.app</code></div></div>
+
+<div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span> <strong>Copy this URL!</strong> This is your <strong>WEBSITE URL</strong>. You'll need it in Step 6.
+</div>
+
+<!-- ─── STEP 6 ─── -->
+<div class="chapter-header">
+    <div class="chapter-tag">Step 6 · 2 minutes</div>
+    <div class="chapter-title">Connect Frontend and Backend</div>
+    <div class="chapter-subtitle">Fix the CORS security rule so your website can talk to your backend</div>
+    <div class="divider"></div>
+</div>
+<div class="step"><div class="step-num">1</div><div class="step-content">Go back to <strong>Google Cloud Console</strong> → <strong>Cloud Run</strong></div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Click your <code>cold-outreach-api</code> service</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Click <strong>"Edit & Deploy New Revision"</strong> (top right)</div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content">Scroll to <strong>"Variables & Secrets"</strong> section</div></div>
+<div class="step"><div class="step-num">5</div><div class="step-content">Update these two variables to your actual Vercel URL:<br>• <code>FRONTEND_URL</code> = your WEBSITE URL<br>• <code>PUBLIC_BASE_URL</code> = your WEBSITE URL</div></div>
+<div class="step"><div class="step-num">6</div><div class="step-content">Click <strong>"Deploy"</strong> at the bottom</div></div>
+<div class="step"><div class="step-num">7</div><div class="step-content">Wait 2 minutes for redeployment</div></div>
+
+<!-- ─── STEP 7 ─── -->
+<div class="chapter-header">
+    <div class="chapter-tag">Step 7 · 1 minute</div>
+    <div class="chapter-title">Create Your Account</div>
+    <div class="divider"></div>
+</div>
+<div class="step"><div class="step-num">1</div><div class="step-content">Open your <strong>WEBSITE URL</strong> in your browser</div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">You'll see a beautiful login page</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Click <strong>"Sign up"</strong> (bottom link)</div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content">Fill in: <strong>Full Name</strong>, <strong>Email</strong>, <strong>Password</strong> (6+ characters)</div></div>
+<div class="step"><div class="step-num">5</div><div class="step-content">Click <strong>"Create account"</strong></div></div>
+
+<div class="callout callout-tip">
+    <span class="callout-icon">🎉</span> You're in! The first person to sign up automatically becomes the admin.
+</div>
+
+<!-- ─── STEP 8 ─── -->
+<div class="chapter-header">
+    <div class="chapter-tag">Step 8 · 30 seconds</div>
+    <div class="chapter-title">Add Demo Data</div>
+    <div class="chapter-subtitle">See how the app looks with real data before connecting your own</div>
+    <div class="divider"></div>
+</div>
+<div class="step"><div class="step-num">1</div><div class="step-content">On the dashboard, find the <strong>"Seed Demo Data"</strong> button (top right, violet color, sparkle icon)</div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Click it</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Wait 2 seconds</div></div>
+<div class="body-text" style="margin-top:10px">You'll now see:</div>
+<div class="step"><div class="step-num">•</div><div class="step-content">4 sending accounts (Gmail + Outlook)</div></div>
+<div class="step"><div class="step-num">•</div><div class="step-content">2 campaigns with 48 leads</div></div>
+<div class="step"><div class="step-num">•</div><div class="step-content">40 warmup messages</div></div>
+<div class="step"><div class="step-num">•</div><div class="step-content">12 replies</div></div>
+<div class="step"><div class="step-num">•</div><div class="step-content">5 notifications</div></div>
+
+<!-- ─── STEP 9 ─── -->
+<div class="chapter-header">
+    <div class="chapter-tag">Step 9 · When Ready</div>
+    <div class="chapter-title">Connect Real Email Accounts</div>
+    <div class="chapter-subtitle">Start sending actual emails through your own Gmail or Outlook accounts</div>
+    <div class="divider"></div>
+</div>
+
+<div class="body-text"><strong>For Gmail:</strong></div>
+<div class="step"><div class="step-num">1</div><div class="step-content">Create an <strong>App Password</strong> (NOT your regular Gmail password):<br>• Go to <strong>https://myaccount.google.com</strong><br>• Click <strong>"Security"</strong> (left sidebar)<br>• Make sure <strong>2-Step Verification</strong> is turned ON<br>• Click <strong>"2-Step Verification"</strong> → scroll down → <strong>"App passwords"</strong><br>• App name: type <code>Lead Dispatcher</code><br>• Click <strong>"Create"</strong><br>• Copy the 16-character password it gives you</div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">In your Lead Dispatcher app:<br>• Go to <strong>"Sending Accounts"</strong> (left sidebar)<br>• Click <strong>"Add Account"</strong><br>• Fill in:<br>&nbsp;&nbsp;– <strong>Label</strong>: <code>Gmail - yourname@gmail.com</code><br>&nbsp;&nbsp;– <strong>Email Address</strong>: your Gmail<br>&nbsp;&nbsp;– <strong>From Name</strong>: your name<br>&nbsp;&nbsp;– <strong>Provider</strong>: select <strong>"Gmail"</strong> (this auto-fills SMTP/IMAP settings!)<br>&nbsp;&nbsp;– <strong>SMTP Password</strong>: paste the App Password<br>&nbsp;&nbsp;– <strong>IMAP Password</strong>: same App Password<br>&nbsp;&nbsp;– <strong>Daily Cap</strong>: start with <code>50</code><br>• Click <strong>"Create Account"</strong></div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Click <strong>"Test"</strong> to verify the connection works</div></div>
+
+<div class="callout callout-warn">
+    <span class="callout-icon">⚠️</span> Start with daily cap = <strong>50</strong>. Increase to 100 only after the account is warmed up (1–2 weeks).
+</div>
+
+<!-- ─── STEP 10 ─── -->
+<div class="chapter-header">
+    <div class="chapter-tag">Step 10 · When Ready</div>
+    <div class="chapter-title">Import Your Leads</div>
+    <div class="divider"></div>
+</div>
+<div class="step"><div class="step-num">1</div><div class="step-content">Go to <strong>"Import Leads"</strong> (left sidebar)</div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content"><strong>Select a campaign</strong> from the dropdown (or create one in Campaigns first)</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content"><strong>Drag your CSV file</strong> into the upload area — any filename works! The app auto-detects columns</div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content">Review the column mapping (it's usually correct — if not, use the dropdowns)</div></div>
+<div class="step"><div class="step-num">5</div><div class="step-content">Click <strong>"Import"</strong></div></div>
+<div class="step"><div class="step-num">6</div><div class="step-content">See how many leads were imported, skipped (duplicates), or suppressed</div></div>
+
+<!-- ─── STEP 11 ─── -->
+<div class="chapter-header">
+    <div class="chapter-tag">Step 11 · Optional</div>
+    <div class="chapter-title">Enable AI Reply Tagging (DeepSeek)</div>
+    <div class="chapter-subtitle">Automatically classify replies as interested, not interested, OOO, etc.</div>
+    <div class="divider"></div>
+</div>
+<div class="step"><div class="step-num">1</div><div class="step-content">Go to <strong>https://platform.deepseek.com</strong> → sign up → add $5 credit (very cheap, lasts months)</div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Copy your API key (starts with <code>sk-</code>)</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">In Google Cloud Run, edit your <code>cold-outreach-api</code> service</div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content">Add environment variable: <code>DEEPSEEK_API_KEY</code> = <code>sk-your-key-here</code></div></div>
+<div class="step"><div class="step-num">5</div><div class="step-content">Click <strong>"Deploy"</strong></div></div>
+<div class="step"><div class="step-num">6</div><div class="step-content">In your app: <strong>Settings → Integrations → DeepSeek LLM → Test Connection</strong></div></div>
+
+<!-- ─── STEP 12 ─── -->
+<div class="chapter-header">
+    <div class="chapter-tag">Step 12 · Optional</div>
+    <div class="chapter-title">Slack/Discord Alerts</div>
+    <div class="chapter-subtitle">Get notified in Slack or Discord when someone replies, bounces, or unsubscribes</div>
+    <div class="divider"></div>
+</div>
+
+<div class="body-text"><strong>Get your webhook URL:</strong></div>
+<div class="body-text"><strong>For Slack:</strong></div>
+<div class="step"><div class="step-num">1</div><div class="step-content">Go to https://api.slack.com/messaging/webhooks → "Create your app"</div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Pick your workspace → create app</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Go to "Incoming Webhooks" → turn ON</div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content">Click "Add New Webhook to Workspace" → pick a channel (like #alerts) → copy URL</div></div>
+
+<div class="body-text" style="margin-top:10px"><strong>For Discord:</strong></div>
+<div class="step"><div class="step-num">1</div><div class="step-content">Open Discord → your server → right-click a channel → <strong>"Edit Channel"</strong></div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Click <strong>"Integrations"</strong> → <strong>"Webhooks"</strong> → <strong>"New Webhook"</strong></div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Copy the URL</div></div>
+
+<div class="body-text" style="margin-top:10px"><strong>Add it to your app:</strong></div>
+<div class="step"><div class="step-num">1</div><div class="step-content">Go to <strong>Settings → Integrations</strong> (in your Lead Dispatcher app)</div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Scroll to <strong>"Webhooks"</strong> section → click <strong>"Add Webhook"</strong></div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Fill in: Type (Slack/Discord), URL (paste), Events (check which to forward)</div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content">Click <strong>"Add Webhook"</strong></div></div>
+<div class="step"><div class="step-num">5</div><div class="step-content">Click <strong>"Test"</strong> — check your Slack/Discord for a test message!</div></div>
+
+<!-- ─── TROUBLESHOOTING ─── -->
+<div class="chapter-header">
+    <div class="chapter-tag">Troubleshooting</div>
+    <div class="chapter-title">Common Issues & Fixes</div>
+    <div class="divider"></div>
+</div>
+
+<div class="callout callout-warn">
+    <span class="callout-icon">🔧</span> <strong>"Failed to fetch" or blank page</strong><br>
+    Your website can't reach your backend. Check:<br>
+    1. In Vercel: is <code>NEXT_PUBLIC_API_URL</code> set to your BACKEND URL?<br>
+    2. In Cloud Run: is <code>FRONTEND_URL</code> set to your Vercel URL?<br>
+    3. Did you redeploy after changing them?
+</div>
+
+<div class="callout callout-info">
+    <span class="callout-icon">🔧</span> <strong>"Unauthorized" errors</strong><br>
+    Your login expired. Just log out and log back in.
+</div>
+
+<div class="callout callout-warn">
+    <span class="callout-icon">🔧</span> <strong>Database won't connect</strong><br>
+    Your Neon link needs <code>?sslmode=require</code> at the end:<br>
+    <code>postgresql://user:pass@host/db?sslmode=require</code>
+</div>
+
+<div class="callout callout-info">
+    <span class="callout-icon">🔧</span> <strong>Cloud Run deployment fails</strong><br>
+    1. Make sure all 4 APIs are enabled (Step 2B)<br>
+    2. Make sure you selected "Allow unauthenticated invocations"<br>
+    3. Make sure your GitHub repo is connected properly
+</div>
+
+<div class="callout callout-warn">
+    <span class="callout-icon">🔧</span> <strong>Worker doesn't seem to run</strong><br>
+    1. Go to Google Cloud Console → Cloud Scheduler<br>
+    2. Click your <code>lead-dispatcher-worker</code> job<br>
+    3. Click "Run now" to test<br>
+    4. Check the logs for errors<br>
+    5. Verify the URL is correct: <code>https://YOUR-BACKEND-URL/api/cron/YOUR-CRON-SECRET</code>
+</div>
+
+<div class="callout callout-info">
+    <span class="callout-icon">🔧</span> <strong>Email sending fails</strong><br>
+    1. Gmail: You MUST use an App Password, not your regular password<br>
+    2. Daily cap too high: Start with 50, not 100<br>
+    3. Account needs warm-up: New accounts should warm up for 1–2 weeks
+</div>
+
+<!-- ─── COST ─── -->
+<div class="chapter-header">
+    <div class="chapter-tag">Cost</div>
+    <div class="chapter-title">How Much Does This Cost?</div>
+    <div class="divider"></div>
+</div>
+
+<table class="cost-table">
+    <tr><th>Service</th><th>Free Amount</th><th>What You Use</th><th>Cost</th></tr>
+    <tr><td>Vercel (website)</td><td>Free forever</td><td>Small site</td><td>$0</td></tr>
+    <tr><td>Google Cloud Run (backend)</td><td>240k vCPU-sec/month</td><td>~5% of free tier</td><td>$0</td></tr>
+    <tr><td>Google Cloud Scheduler</td><td>3 jobs free</td><td>1 job</td><td>$0</td></tr>
+    <tr><td>Neon (database)</td><td>0.5GB free</td><td>&lt;100MB</td><td>$0</td></tr>
+    <tr><td colspan="3">Total Monthly Cost</td><td>$0/month</td></tr>
+</table>
+
+<div class="body-text">After 90 days: Google's $300 credit expires, but the always-free tier still covers your usage. Expected cost: <strong>$0–8/month</strong>.</div>
+
+<div class="body-text">Optional: Add Cloud NAT (~$33/month) for a fixed IP address — improves email deliverability but not required.</div>
+
+<!-- ─── QUICK REFERENCE ─── -->
+<div class="chapter-header">
+    <div class="chapter-tag">Quick Reference</div>
+    <div class="chapter-title">All Your Important Links</div>
+    <div class="chapter-subtitle">Fill this in as you go, then save it somewhere safe</div>
+    <div class="divider"></div>
+</div>
+
+<div class="ref-box">
+    <div class="ref-box-title">📝 Fill In These Values</div>
+    <div class="ref-line"><strong>DATABASE LINK:</strong>&nbsp;&nbsp;_____________________________________</div>
+    <div class="ref-line"><strong>JWT SECRET:</strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;_____________________________________</div>
+    <div class="ref-line"><strong>ENCRYPTION KEY:</strong>&nbsp;&nbsp;_____________________________________</div>
+    <div class="ref-line"><strong>CRON SECRET:</strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;_____________________________________</div>
+    <div class="ref-line"><strong>BACKEND URL:</strong>&nbsp;&nbsp;&nbsp;&nbsp;https://cold-outreach-api-______.a.run.app</div>
+    <div class="ref-line"><strong>WEBSITE URL:</strong>&nbsp;&nbsp;&nbsp;&nbsp;https://cold-outreach-frontend-______.vercel.app</div>
+</div>
+
+</div>
+
+<!-- ═══ ENDING PAGE ═══ -->
+<div class="ending">
+    <div class="ending-icon">🎉</div>
+    <div class="ending-title">You're Done!</div>
+    <div class="ending-subtitle">You've built your own cold email automation platform without touching a terminal. Now go send some emails!</div>
+    <div class="ending-links">
+        <div class="ending-link">Frontend: github.com/interiorvisualsd-maker/cold-outreach-frontend</div>
+        <div class="ending-link">Backend: github.com/interiorvisualsd-maker/cold-outreach-backend</div>
+    </div>
+    <div class="ending-footer">Lead Dispatcher · Zero-Cost Private Cold Email Automation</div>
+</div>
+
+</body>
+</html>
