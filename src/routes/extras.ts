@@ -689,4 +689,94 @@ app.post('/notifications/seed-demo', async (c) => {
   return c.json({ ok: true, seeded: demo.length })
 })
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GLOBAL LEAD SEARCH — search by email or company name (for command palette)
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.get('/search/leads', async (c) => {
+  const q = c.req.query('q') || ''
+  if (q.length < 2) return c.json({ results: [] })
+  const limit = Math.min(parseInt(c.req.query('limit') || '10'), 20)
+
+  // Search by email OR company name OR website
+  const results = await db.lead.findMany({
+    where: {
+      OR: [
+        { email: { contains: q } },
+        { companyName: { contains: q } },
+        { website: { contains: q } },
+      ],
+    },
+    orderBy: { updatedAt: 'desc' },
+    take: limit,
+    select: {
+      id: true,
+      email: true,
+      companyName: true,
+      website: true,
+      state: true,
+      industry: true,
+      status: true,
+      currentStep: true,
+      repliedAt: true,
+      bouncedAt: true,
+      campaignId: true,
+      campaign: { select: { name: true } },
+    },
+  })
+
+  return c.json({ results })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UNSUBSCRIBE — public endpoint for /u/:leadId link in email footers
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/extras/unsubscribe/:leadId — check if lead exists (for landing page)
+app.get('/unsubscribe/:leadId', async (c) => {
+  const leadId = c.req.param('leadId')
+  const lead = await db.lead.findUnique({
+    where: { id: leadId },
+    select: { id: true, email: true, companyName: true, status: true, unsubscribedAt: true },
+  })
+  if (!lead) return c.json({ error: 'Invalid unsubscribe link' }, 404)
+  return c.json({
+    lead: {
+      id: lead.id,
+      email: lead.email.replace(/(.{2}).*(@.*)/, '$1***$2'), // mask for privacy
+      companyName: lead.companyName,
+      alreadyUnsubscribed: lead.status === 'unsubscribed',
+    },
+  })
+})
+
+// POST /api/extras/unsubscribe/:leadId — actually unsubscribe
+app.post('/unsubscribe/:leadId', async (c) => {
+  const leadId = c.req.param('leadId')
+  const lead = await db.lead.findUnique({
+    where: { id: leadId },
+    select: { id: true, email: true, campaignId: true, campaign: { select: { name: true } } },
+  })
+  if (!lead) return c.json({ error: 'Invalid unsubscribe link' }, 404)
+
+  if (lead.email) {
+    await db.suppressionList.upsert({
+      where: { email_reason: { email: lead.email.toLowerCase(), reason: 'unsubscribe' } },
+      create: { email: lead.email.toLowerCase(), reason: 'unsubscribe', source: lead.campaign?.name || 'unsubscribe-link' },
+      update: {},
+    })
+  }
+  await db.lead.update({
+    where: { id: leadId },
+    data: { status: 'unsubscribed', unsubscribedAt: new Date() },
+  })
+  // Cancel all queued emails for this lead
+  await db.scheduledEmail.updateMany({
+    where: { leadId, status: 'queued' },
+    data: { status: 'cancelled' },
+  })
+
+  return c.json({ ok: true, message: 'You have been unsubscribed successfully' })
+})
+
 export default app

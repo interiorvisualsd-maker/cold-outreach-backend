@@ -94,6 +94,46 @@ app.get('/api/extras/t/c/:trackingId', async (c) => {
   return c.redirect(url)
 })
 
+// Public unsubscribe routes (lead clicks link in email — no auth)
+// GET /api/extras/unsubscribe/:leadId — check if lead exists (for landing page)
+// POST /api/extras/unsubscribe/:leadId — actually unsubscribe
+app.get('/api/extras/unsubscribe/:leadId', async (c) => {
+  const { db } = await import('./lib/db')
+  const leadId = c.req.param('leadId')
+  const lead = await db.lead.findUnique({
+    where: { id: leadId },
+    select: { id: true, email: true, companyName: true, status: true },
+  })
+  if (!lead) return c.json({ error: 'Invalid unsubscribe link' }, 404)
+  return c.json({
+    lead: {
+      id: lead.id,
+      email: lead.email.replace(/(.{2}).*(@.*)/, '$1***$2'),
+      companyName: lead.companyName,
+      alreadyUnsubscribed: lead.status === 'unsubscribed',
+    },
+  })
+})
+app.post('/api/extras/unsubscribe/:leadId', async (c) => {
+  const { db } = await import('./lib/db')
+  const leadId = c.req.param('leadId')
+  const lead = await db.lead.findUnique({
+    where: { id: leadId },
+    select: { id: true, email: true, campaignId: true, campaign: { select: { name: true } } },
+  })
+  if (!lead) return c.json({ error: 'Invalid unsubscribe link' }, 404)
+  if (lead.email) {
+    await db.suppressionList.upsert({
+      where: { email_reason: { email: lead.email.toLowerCase(), reason: 'unsubscribe' } },
+      create: { email: lead.email.toLowerCase(), reason: 'unsubscribe', source: lead.campaign?.name || 'unsubscribe-link' },
+      update: {},
+    })
+  }
+  await db.lead.update({ where: { id: leadId }, data: { status: 'unsubscribed', unsubscribedAt: new Date() } })
+  await db.scheduledEmail.updateMany({ where: { leadId, status: 'queued' }, data: { status: 'cancelled' } })
+  return c.json({ ok: true, message: 'Unsubscribed successfully' })
+})
+
 // Protected routes — require Bearer token
 const protectedApi = new Hono()
 protectedApi.use('*', authMiddleware)
