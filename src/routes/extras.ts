@@ -1099,6 +1099,31 @@ app.get('/webhooks/deliveries', async (c) => {
   })
 })
 
+// GET /api/extras/webhooks/summary — lightweight summary for dashboard widget
+app.get('/webhooks/summary', async (c) => {
+  const { getDeliveryLogs } = await import('../lib/notifications')
+  const logs = await getDeliveryLogs()
+  const total = logs.length
+  const success = logs.filter((l: any) => l.success).length
+  const failed = total - success
+  const successRate = total > 0 ? Math.round((success / total) * 100) : 100
+  // Last 24h stats
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+  const recent = logs.filter((l: any) => new Date(l.timestamp) >= yesterday)
+  const recentSuccess = recent.filter((l: any) => l.success).length
+  return c.json({
+    total,
+    success,
+    failed,
+    successRate,
+    last24h: {
+      total: recent.length,
+      success: recentSuccess,
+      failed: recent.length - recentSuccess,
+    },
+  })
+})
+
 // ─────────────────────────────────────────────────────────────────────────────
 // NOTIFICATION PREFERENCES — per-event-type enable/disable
 // ─────────────────────────────────────────────────────────────────────────────
