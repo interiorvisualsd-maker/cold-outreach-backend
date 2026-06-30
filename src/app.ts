@@ -36,6 +36,41 @@ app.use('*', cors({
 // Health check (public)
 app.get('/api/health', (c) => c.json({ ok: true, service: 'lead-dispatcher-backend', ts: Date.now() }))
 
+// Public cron endpoint — called by Cloud Scheduler every 5 minutes
+// Protected by a secret in the URL path (CRON_SECRET env var)
+// This replaces the need for a separate Cloud Run Job + CLI setup
+app.all('/api/cron/:secret', async (c) => {
+  const secret = c.req.param('secret')
+  const expectedSecret = process.env.CRON_SECRET
+  if (!expectedSecret || secret !== expectedSecret) {
+    return c.json({ error: 'Unauthorized' }, 401)
+  }
+  try {
+    const { processSendBatch } = await import('./modules/dispatcher')
+    const { processWarmupBatch, processWarmupInbound } = await import('./modules/warmup')
+    const { processInboundReplies } = await import('./modules/unibox')
+
+    const sendResult = await processSendBatch(30).catch((e: any) => ({ error: e?.message }))
+    const warmupResult = await processWarmupBatch(15).catch((e: any) => ({ error: e?.message }))
+    const warmupInboundResult = await processWarmupInbound().catch((e: any) => ({ error: e?.message }))
+    const replyResult = await processInboundReplies().catch((e: any) => ({ error: e?.message }))
+
+    return c.json({
+      ok: true,
+      timestamp: new Date().toISOString(),
+      results: {
+        sends: sendResult,
+        warmup: warmupResult,
+        warmupInbound: warmupInboundResult,
+        replies: replyResult,
+      },
+    })
+  } catch (e: any) {
+    console.error('[cron] tick error:', e?.message)
+    return c.json({ ok: false, error: e?.message }, 500)
+  }
+})
+
 // Public auth routes (login, register) — no token required
 app.route('/api/auth', authRoutes)
 
