@@ -1087,4 +1087,16 @@ app.post('/webhooks/test', async (c) => {
   }
 })
 
+// GET /api/extras/webhooks/deliveries — webhook delivery log history
+app.get('/webhooks/deliveries', async (c) => {
+  const { getDeliveryLogs } = await import('../lib/notifications')
+  const logs = await getDeliveryLogs()
+  const successCount = logs.filter((l: any) => l.success).length
+  const failCount = logs.length - successCount
+  return c.json({
+    deliveries: logs.slice(0, 50), // return latest 50
+    summary: { total: logs.length, success: successCount, failed: failCount },
+  })
+})
+
 export default app

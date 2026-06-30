@@ -277,6 +277,17 @@ export async function resetDailyCounters() {
       account.warmupTargetMax
     )
     const newState = target >= account.warmupTargetMax ? 'warm' : 'heating'
+
+    // If transitioning to 'warm', push a milestone notification
+    if (newState === 'warm' && account.warmupState !== 'warm') {
+      await pushNotification({
+        type: 'warmup',
+        severity: 'success',
+        title: 'Warm-up milestone reached 🎉',
+        message: `${account.emailAddress} is now fully warmed (${account.warmupTargetMax} emails/day). Ready for production sending.`,
+      }).catch(() => {})
+    }
+
     await db.smtpAccount.update({
       where: { id: account.id },
       data: { warmupDay: newDay, warmupState: newState },

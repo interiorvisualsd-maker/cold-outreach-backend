@@ -70,10 +70,22 @@ async function sendWebhooks(notif: Notification) {
   const activeWebhooks = webhooks.filter((w) => w.enabled && w.url)
   if (activeWebhooks.length === 0) return
 
+  const deliveryLogs: DeliveryLog[] = []
+
   await Promise.all(
     activeWebhooks.map(async (webhook) => {
       // Check if this webhook should receive this event type
       if (webhook.events.length > 0 && !webhook.events.includes(notif.type)) return
+
+      const log: DeliveryLog = {
+        webhookId: webhook.id,
+        webhookLabel: webhook.label || webhook.type,
+        webhookType: webhook.type,
+        eventType: notif.type,
+        title: notif.title,
+        success: false,
+        timestamp: new Date().toISOString(),
+      }
 
       try {
         let body: Record<string, any>
@@ -112,17 +124,76 @@ async function sendWebhooks(notif: Notification) {
           body = { event: notif.type, severity: notif.severity, title: notif.title, message: notif.message, timestamp: notif.createdAt }
         }
 
-        await fetch(webhook.url, {
+        const res = await fetch(webhook.url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(10000), // 10s timeout
         })
+
+        log.success = res.ok
+        log.statusCode = res.status
+        if (!res.ok) {
+          const text = await res.text().catch(() => '')
+          log.error = text.slice(0, 200) || `HTTP ${res.status}`
+        }
       } catch (e: any) {
-        console.error(`[webhook] ${webhook.type} failed:`, e?.message)
+        log.error = e?.message || 'fetch failed'
       }
+
+      deliveryLogs.push(log)
     }),
   )
+
+  // Persist delivery logs (fire and forget)
+  if (deliveryLogs.length > 0) {
+    persistDeliveryLogs(deliveryLogs).catch(() => {})
+  }
+}
+
+interface DeliveryLog {
+  webhookId: string
+  webhookLabel: string
+  webhookType: string
+  eventType: string
+  title: string
+  success: boolean
+  statusCode?: number
+  error?: string
+  timestamp: string
+}
+
+let deliveryCache: DeliveryLog[] | null = null
+
+async function loadDeliveryLogs(): Promise<DeliveryLog[]> {
+  if (deliveryCache) return deliveryCache
+  try {
+    const setting = await db.setting.findUnique({ where: { key: 'webhook_deliveries' } })
+    if (!setting) return []
+    deliveryCache = JSON.parse(setting.value)
+    return deliveryCache!
+  } catch {
+    return []
+  }
+}
+
+async function persistDeliveryLogs(newLogs: DeliveryLog[]) {
+  try {
+    const existing = await loadDeliveryLogs()
+    const combined = [...newLogs, ...existing].slice(0, 200) // keep last 200
+    deliveryCache = combined
+    await db.setting.upsert({
+      where: { key: 'webhook_deliveries' },
+      create: { key: 'webhook_deliveries', value: JSON.stringify(combined) },
+      update: { value: JSON.stringify(combined) },
+    })
+  } catch (e: any) {
+    console.error('[webhooks] delivery log persist failed:', e?.message)
+  }
+}
+
+export async function getDeliveryLogs(): Promise<DeliveryLog[]> {
+  return loadDeliveryLogs()
 }
 
 export async function pushNotification(params: {
