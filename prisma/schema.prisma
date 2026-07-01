@@ -1,13 +1,13 @@
 // Lead Dispatcher — Prisma schema
-// Portable: SQLite (sandbox) → Postgres (Neon production)
-// To switch to Postgres: change provider to "postgresql" and DATABASE_URL to postgres connection string
+// Production: PostgreSQL (Neon)
+// For local dev with SQLite: change provider to "sqlite" and use a file:// DATABASE_URL
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 

@@ -17,10 +17,13 @@ COPY . .
 # Generate Prisma client
 RUN bunx prisma generate
 
+# Make startup script executable
+RUN chmod +x start.sh
+
 # Render sets PORT automatically (usually 10000).
 # Cloud Run sets PORT to 8080.
 # server.ts reads from process.env.PORT, so this works everywhere.
 EXPOSE 8080
 
-# Start the API server (worker runs via cron endpoint /api/cron/:secret)
-CMD ["bun", "src/server.ts"]
+# Run startup script: creates database tables, then starts server
+CMD ["./start.sh"]
