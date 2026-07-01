@@ -1173,4 +1173,30 @@ app.post('/notification-prefs/test', async (c) => {
   return c.json({ ok: true, message: 'Test notification sent' })
 })
 
+// CLEAR ALL DATA — wipes everything except users (for production go-live)
+app.post('/clear-all', async (c) => {
+  await db.emailLog.deleteMany()
+  await db.reply.deleteMany()
+  await db.warmupMessage.deleteMany()
+  await db.scheduledEmail.deleteMany()
+  await db.emailStep.deleteMany()
+  await db.lead.deleteMany()
+  await db.campaign.deleteMany()
+  await db.suppressionList.deleteMany()
+  await db.smtpAccount.deleteMany()
+
+  await db.setting.deleteMany({
+    where: {
+      OR: [
+        { key: 'notifications' },
+        { key: 'webhook_deliveries' },
+        { key: 'templates' },
+        { key: 'webhooks' },
+      ]
+    }
+  })
+
+  return c.json({ ok: true, message: 'All data cleared (users preserved)' })
+})
+
 export default app
