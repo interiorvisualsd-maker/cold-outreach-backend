@@ -1,6 +1,12 @@
 #!/bin/sh
 # Startup script — creates database tables then starts the server
-# This runs on Render (and any Docker host)
+
+# Force IPv4 for Hostinger SMTP/IMAP by adding /etc/hosts entries
+# This bypasses DNS entirely and prevents IPv6 connections to Cloudflare
+echo "172.65.255.143 smtp.hostinger.com" >> /etc/hosts
+echo "172.65.188.64 imap.hostinger.com" >> /etc/hosts
+echo "172.65.188.64 pop.hostinger.com" >> /etc/hosts
+echo "[startup] Added IPv4 /etc/hosts entries for Hostinger"
 
 echo "[startup] Pushing database schema to Neon..."
 cd /app
