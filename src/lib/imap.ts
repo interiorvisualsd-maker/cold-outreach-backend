@@ -1,6 +1,16 @@
 import { ImapFlow } from 'imapflow'
 import type { SmtpAccount } from '@prisma/client'
 import { decrypt } from './crypto'
+import dns from 'node:dns/promises'
+
+async function resolveIPv4(hostname: string): Promise<string | null> {
+  try {
+    const records = await dns.resolve4(hostname)
+    return records[0] || null
+  } catch {
+    return null
+  }
+}
 
 export interface ImapMessage {
   uid: number

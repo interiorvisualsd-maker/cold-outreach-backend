@@ -1,6 +1,17 @@
 import nodemailer from 'nodemailer'
 import type { SmtpAccount } from '@prisma/client'
 import { decrypt } from './crypto'
+import dns from 'node:dns/promises'
+
+// Resolve hostname to IPv4 address, bypassing Cloudflare IPv6 issues
+async function resolveIPv4(hostname: string): Promise<string | null> {
+  try {
+    const records = await dns.resolve4(hostname)
+    return records[0] || null
+  } catch {
+    return null
+  }
+}
 
 // Cache of SMTP transports keyed by account ID — recreated if older than 10 min
 interface CachedTransport {
@@ -53,7 +64,7 @@ export interface SendMailOptions {
 }
 
 export async function sendMail(account: SmtpAccount, opts: SendMailOptions): Promise<{ messageId: string }> {
-  const transporter = getTransporter(account)
+  const transporter = await getTransporter(account)
   const from = `"${opts.fromName || account.fromName}" <${opts.fromEmail || account.emailAddress}>`
   const info = await transporter.sendMail({
     from,
@@ -73,7 +84,7 @@ export async function sendMail(account: SmtpAccount, opts: SendMailOptions): Pro
 // Verify SMTP credentials (used in account setup)
 export async function verifySmtp(account: SmtpAccount): Promise<{ ok: boolean; error?: string }> {
   try {
-    const transporter = getTransporter(account)
+    const transporter = await getTransporter(account)
     await transporter.verify()
     return { ok: true }
   } catch (e: any) {
