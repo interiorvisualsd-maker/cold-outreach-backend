@@ -1,19 +1,10 @@
 import nodemailer from 'nodemailer'
 import type { SmtpAccount } from '@prisma/client'
 import { decrypt } from './crypto'
-import dns from 'node:dns/promises'
+import dns from 'node:dns'
+import { lookup as dnsLookup } from 'node:dns/promises'
 
-// Resolve hostname to IPv4 address, bypassing Cloudflare IPv6 issues
-async function resolveIPv4(hostname: string): Promise<string | null> {
-  try {
-    const records = await dns.resolve4(hostname)
-    return records[0] || null
-  } catch {
-    return null
-  }
-}
-
-// Cache of SMTP transports keyed by account ID — recreated if older than 10 min
+// Cache of SMTP transports keyed by account ID
 interface CachedTransport {
   transporter: nodemailer.Transporter
   createdAt: number
@@ -21,24 +12,47 @@ interface CachedTransport {
 const transportCache = new Map<string, CachedTransport>()
 const CACHE_TTL = 10 * 60 * 1000
 
-export function getTransporter(account: SmtpAccount): nodemailer.Transporter {
+// Force IPv4 for all DNS resolution
+dns.setDefaultResultOrder('ipv4first')
+
+// Resolve hostname to IPv4 address using dns.lookup (respects /etc/hosts)
+async function resolveIPv4(hostname: string): Promise<string> {
+  try {
+    const result = await dnsLookup(hostname, { family: 4, all: false })
+    return result.address
+  } catch {
+    // If lookup fails, return the hostname as-is (fallback)
+    return hostname
+  }
+}
+
+export async function getTransporter(account: SmtpAccount): Promise<nodemailer.Transporter> {
   const cached = transportCache.get(account.id)
   if (cached && Date.now() - cached.createdAt < CACHE_TTL) {
     return cached.transporter
   }
   const password = decrypt(account.smtpPassEnc)
+  
+  // Resolve to IPv4 address — this bypasses IPv6/Cloudflare issues
+  const smtpIp = await resolveIPv4(account.smtpHost)
+  console.log(`[smtp] Resolved ${account.smtpHost} → ${smtpIp}`)
+  
   const transporter = nodemailer.createTransport({
-    host: account.smtpHost,
+    host: smtpIp, // Use IP directly, not hostname
     port: account.smtpPort,
     secure: account.smtpSecure,
     auth: {
       user: account.smtpUser,
       pass: password,
     },
-    // Soft fail on first connection errors so we can log + auto-pause
+    family: 4,
     connectionTimeout: 8000,
     greetingTimeout: 5000,
     socketTimeout: 10000,
+    tls: {
+      servername: account.smtpHost, // Use original hostname for TLS cert
+      rejectUnauthorized: false,
+    },
   })
   transportCache.set(account.id, { transporter, createdAt: Date.now() })
   return transporter
@@ -81,7 +95,6 @@ export async function sendMail(account: SmtpAccount, opts: SendMailOptions): Pro
   return { messageId: info.messageId }
 }
 
-// Verify SMTP credentials (used in account setup)
 export async function verifySmtp(account: SmtpAccount): Promise<{ ok: boolean; error?: string }> {
   try {
     const transporter = await getTransporter(account)
