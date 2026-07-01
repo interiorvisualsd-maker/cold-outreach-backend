@@ -21,16 +21,12 @@ process.on('unhandledRejection', (err) => {
 
 const app = new Hono()
 
-// CORS — allows Vercel frontend to call Cloud Run backend in production
+// CORS — allow all origins (private internal tool)
+// This prevents CORS errors when the Vercel URL changes or FRONTEND_URL env var is misconfigured
 app.use('*', cors({
-  origin: (origin) => {
-    const allowed = (process.env.FRONTEND_URL || '').split(',').filter(Boolean)
-    if (!origin || allowed.length === 0) return origin || '*'
-    return allowed.includes(origin) ? origin : null
-  },
+  origin: '*',
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization'],
-  credentials: true,
 }))
 
 // Health check (public)
