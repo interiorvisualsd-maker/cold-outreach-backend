@@ -42,7 +42,7 @@ export async function getImapClient(account: SmtpAccount): Promise<ImapFlow> {
       pass: password,
     },
     logger: false,
-    socketTimeout: 10000,
+    socketTimeout: 8000,
     connectTimeout: 5000,
     tls: {
       family: 4, // Force IPv4
