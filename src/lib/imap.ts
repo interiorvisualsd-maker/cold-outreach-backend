@@ -42,7 +42,8 @@ export async function getImapClient(account: SmtpAccount): Promise<ImapFlow> {
       pass: password,
     },
     logger: false,
-    socketTimeout: 20000,
+    socketTimeout: 10000,
+    connectTimeout: 5000,
   })
   await client.connect()
   return client
