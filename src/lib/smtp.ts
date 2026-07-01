@@ -25,9 +25,9 @@ export function getTransporter(account: SmtpAccount): nodemailer.Transporter {
       pass: password,
     },
     // Soft fail on first connection errors so we can log + auto-pause
-    connectionTimeout: 5000,
-    greetingTimeout: 5000,
-    socketTimeout: 10000,
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 15000,
   })
   transportCache.set(account.id, { transporter, createdAt: Date.now() })
   return transporter
