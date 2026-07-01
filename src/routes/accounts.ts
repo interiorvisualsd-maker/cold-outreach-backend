@@ -54,7 +54,7 @@ app.get('/:id', async (c) => {
   return c.json({ account: safe })
 })
 
-// POST /api/accounts — create
+// POST /api/accounts — create (auto-verifies SMTP + IMAP before saving)
 app.post('/', async (c) => {
   const body = await c.req.json()
   const parsed = createSchema.safeParse(body)
@@ -62,6 +62,56 @@ app.post('/', async (c) => {
     return c.json({ error: parsed.error.issues[0]?.message || 'Invalid input' }, 400)
   }
   const d = parsed.data
+
+  // Create a temporary account object for testing (not saved to DB yet)
+  const tempAccount = {
+    id: 'temp-' + Date.now(),
+    label: d.label,
+    emailAddress: d.emailAddress,
+    fromName: d.fromName,
+    smtpHost: d.smtpHost,
+    smtpPort: d.smtpPort,
+    smtpUser: d.smtpUser,
+    smtpPassEnc: encrypt(d.smtpPass),
+    smtpSecure: d.smtpSecure,
+    imapHost: d.imapHost,
+    imapPort: d.imapPort,
+    imapUser: d.imapUser,
+    imapPassEnc: encrypt(d.imapPass),
+    imapSecure: d.imapSecure,
+    provider: d.provider,
+  } as any
+
+  // Test SMTP connection
+  const smtpResult = await verifySmtp(tempAccount)
+  if (!smtpResult.ok) {
+    return c.json({
+      error: `SMTP verification failed: ${smtpResult.error}`,
+      field: 'smtp',
+      smtpError: smtpResult.error,
+    }, 400)
+  }
+
+  // Test IMAP connection
+  let imapOk = false
+  let imapError: string | undefined
+  try {
+    const client = await getImapClient(tempAccount)
+    await client.logout()
+    imapOk = true
+  } catch (e: any) {
+    imapError = e?.message
+  }
+
+  if (!imapOk) {
+    return c.json({
+      error: `IMAP verification failed: ${imapError}`,
+      field: 'imap',
+      imapError,
+    }, 400)
+  }
+
+  // Both passed — save the account
   const account = await db.smtpAccount.create({
     data: {
       label: d.label,
@@ -86,15 +136,40 @@ app.post('/', async (c) => {
       warmupTargetMax: d.warmupTargetMax,
     },
   })
-  return c.json({ account: { ...account, smtpPassEnc: undefined, imapPassEnc: undefined } })
+  return c.json({ account: { ...account, smtpPassEnc: undefined, imapPassEnc: undefined }, verified: true })
 })
 
-// PUT /api/accounts/:id — update (credentials optional)
+// PUT /api/accounts/:id — update (credentials optional, auto-verifies if changed)
 app.put('/:id', async (c) => {
   const id = c.req.param('id')
   const body = await c.req.json()
   const existing = await db.smtpAccount.findUnique({ where: { id } })
   if (!existing) return c.json({ error: 'Not found' }, 404)
+
+  // If SMTP or IMAP credentials are being changed, verify them first
+  if (body.smtpPass || body.imapPass || body.smtpHost || body.imapHost || body.smtpPort || body.imapPort) {
+    const testAccount = {
+      ...existing,
+      smtpPassEnc: body.smtpPass ? encrypt(body.smtpPass) : existing.smtpPassEnc,
+      imapPassEnc: body.imapPass ? encrypt(body.imapPass) : existing.imapPassEnc,
+      smtpHost: body.smtpHost || existing.smtpHost,
+      smtpPort: body.smtpPort || existing.smtpPort,
+      imapHost: body.imapHost || existing.imapHost,
+      imapPort: body.imapPort || existing.imapPort,
+    } as any
+
+    const smtpResult = await verifySmtp(testAccount)
+    if (!smtpResult.ok) {
+      return c.json({ error: `SMTP verification failed: ${smtpResult.error}`, field: 'smtp' }, 400)
+    }
+
+    try {
+      const client = await getImapClient(testAccount)
+      await client.logout()
+    } catch (e: any) {
+      return c.json({ error: `IMAP verification failed: ${e?.message}`, field: 'imap' }, 400)
+    }
+  }
 
   const data: any = {
     label: body.label,
