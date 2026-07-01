@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Lead Dispatcher — Setup Guide</title>
+<title>Lead Dispatcher — Setup Guide (Render Edition)</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
 @page {
@@ -64,22 +64,24 @@ html, body {
 .cover::before {
     content: '';
     position: absolute;
-    top: -100px;
-    right: -100px;
-    width: 400px;
-    height: 400px;
+    top: 0;
+    right: 0;
+    width: 350px;
+    height: 350px;
     border-radius: 50%;
     background: rgba(255,255,255,0.08);
+    transform: translate(120px, -120px);
 }
 .cover::after {
     content: '';
     position: absolute;
-    bottom: -80px;
-    left: -80px;
-    width: 300px;
-    height: 300px;
+    bottom: 0;
+    left: 0;
+    width: 280px;
+    height: 280px;
     border-radius: 50%;
     background: rgba(255,255,255,0.06);
+    transform: translate(-100px, 100px);
 }
 .cover-logo {
     width: 64px;
@@ -91,7 +93,7 @@ html, body {
     justify-content: center;
     font-size: 32px;
     margin-bottom: 32px;
-    backdrop-filter: blur(10px);
+    z-index: 1;
 }
 .cover-badge {
     background: rgba(255,255,255,0.15);
@@ -102,7 +104,7 @@ html, body {
     letter-spacing: 0.05em;
     text-transform: uppercase;
     margin-bottom: 24px;
-    backdrop-filter: blur(10px);
+    z-index: 1;
 }
 .cover-title {
     font-size: 42px;
@@ -111,21 +113,24 @@ html, body {
     line-height: 1.15;
     letter-spacing: -0.02em;
     margin-bottom: 16px;
+    z-index: 1;
 }
 .cover-subtitle {
     font-size: 18px;
     font-weight: 400;
     text-align: center;
-    color: rgba(255,255,255,0.8);
+    color: rgba(255,255,255,0.85);
     max-width: 480px;
     line-height: 1.5;
     margin-bottom: 48px;
+    z-index: 1;
 }
 .cover-features {
     display: flex;
     flex-direction: column;
     gap: 12px;
     margin-bottom: 48px;
+    z-index: 1;
 }
 .cover-feature {
     display: flex;
@@ -427,31 +432,34 @@ html, body {
 .ending-icon {
     font-size: 48px;
     margin-bottom: 24px;
+    z-index: 1;
 }
 .ending-title {
     font-size: 36px;
     font-weight: 800;
     margin-bottom: 16px;
     letter-spacing: -0.02em;
+    z-index: 1;
 }
 .ending-subtitle {
     font-size: 17px;
-    color: rgba(255,255,255,0.8);
+    color: rgba(255,255,255,0.85);
     max-width: 460px;
     line-height: 1.5;
     margin-bottom: 40px;
+    z-index: 1;
 }
 .ending-links {
     display: flex;
     flex-direction: column;
     gap: 10px;
     font-size: 14px;
+    z-index: 1;
 }
 .ending-link {
     background: rgba(255,255,255,0.15);
     padding: 10px 20px;
     border-radius: 8px;
-    backdrop-filter: blur(10px);
     font-weight: 500;
 }
 .ending-footer {
@@ -470,16 +478,16 @@ html, body {
 <!-- ═══ COVER PAGE ═══ -->
 <div class="cover">
     <div class="cover-logo">⚡</div>
-    <div class="cover-badge">No Terminal Required</div>
+    <div class="cover-badge">No Terminal · No Credit Card</div>
     <div class="cover-title">Lead Dispatcher<br>Setup Guide</div>
-    <div class="cover-subtitle">A complete, step-by-step guide to deploying your own cold email automation platform — using only website interfaces.</div>
+    <div class="cover-subtitle">Deploy your own cold email automation platform using Render, Vercel, and Neon — all free, no terminal required.</div>
     <div class="cover-features">
         <div class="cover-feature"><div class="cover-feature-icon">✓</div> Zero command line — 100% web UI</div>
-        <div class="cover-feature"><div class="cover-feature-icon">✓</div> Free hosting on Vercel + Google Cloud + Neon</div>
-        <div class="cover-feature"><div class="cover-feature-icon">✓</div> Setup in 30–45 minutes</div>
+        <div class="cover-feature"><div class="cover-feature-icon">✓</div> No credit card required (Render free tier)</div>
+        <div class="cover-feature"><div class="cover-feature-icon">✓</div> Setup in 20–30 minutes</div>
         <div class="cover-feature"><div class="cover-feature-icon">✓</div> Written for non-technical users</div>
     </div>
-    <div class="cover-footer">Lead Dispatcher · Private Cold Email Automation</div>
+    <div class="cover-footer">Lead Dispatcher · Render Edition · Private Cold Email Automation</div>
 </div>
 
 <!-- ═══ MAIN CONTENT ═══ -->
@@ -491,14 +499,18 @@ html, body {
     <div class="chapter-title">What You Need</div>
     <div class="divider"></div>
 </div>
-<div class="body-text">This guide walks you through setting up your cold email automation app from scratch. You will <strong>not use the terminal or command line at all</strong>. Everything is done through websites you already know how to use.</div>
+<div class="body-text">This guide walks you through setting up your cold email automation app from scratch. You will <strong>not use the terminal or command line at all</strong>. Everything is done through websites.</div>
 <div class="body-text">You need three things before starting:</div>
-<div class="step"><div class="step-num">1</div><div class="step-content">A <strong>Google account</strong> (Gmail works perfectly)</div></div>
-<div class="step"><div class="step-num">2</div><div class="step-content">Your <strong>GitHub repos</strong> (already created for you):<br>• Frontend: github.com/interiorvisualsd-maker/cold-outreach-frontend<br>• Backend: github.com/interiorvisualsd-maker/cold-outreach-backend</div></div>
-<div class="step"><div class="step-num">3</div><div class="step-content"><strong>30–45 minutes</strong> of focused time</div></div>
+<div class="step"><div class="step-num">1</div><div class="step-content">A <strong>Google account</strong> (Gmail works) — used for Neon and Vercel</div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">A <strong>GitHub account</strong> — your repos are already created:<br>• Frontend: github.com/interiorvisualsd-maker/cold-outreach-frontend<br>• Backend: github.com/interiorvisualsd-maker/cold-outreach-backend</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content"><strong>20–30 minutes</strong> of focused time</div></div>
 
 <div class="callout callout-info">
-    <span class="callout-icon">💡</span> <strong>How to think about it:</strong> You're setting up three websites that work together. Think of it like a restaurant — Neon is the pantry (stores data), Google Cloud is the kitchen (does the work), and Vercel is the dining room (where you sit and interact).
+    <span class="callout-icon">💡</span> <strong>How it works:</strong> You're setting up three free websites that work together. <strong>Neon</strong> stores your data, <strong>Render</strong> runs the backend (sends emails), and <strong>Vercel</strong> hosts the website you log into.
+</div>
+
+<div class="callout callout-tip">
+    <span class="callout-icon">✅</span> <strong>Why Render instead of Google Cloud?</strong> Render's free tier doesn't require a credit card, has no fraud-prevention blocks, and works in every country. Google Cloud's billing verification can be difficult to pass in some regions.
 </div>
 
 <!-- ─── STEP 1 ─── -->
@@ -521,129 +533,98 @@ html, body {
 
 <!-- ─── STEP 2 ─── -->
 <div class="chapter-header">
-    <div class="chapter-tag">Step 2 · 10 minutes</div>
-    <div class="chapter-title">Set Up Google Cloud</div>
-    <div class="chapter-subtitle">Google Cloud runs your backend — the "brain" that sends emails and checks replies</div>
+    <div class="chapter-tag">Step 2 · 3 minutes</div>
+    <div class="chapter-title">Generate Your Secret Keys</div>
+    <div class="chapter-subtitle">Your app needs 3 secret keys to keep passwords and data safe</div>
     <div class="divider"></div>
 </div>
 
-<div class="body-text"><strong>2A. Create a Google Cloud project</strong></div>
-<div class="step"><div class="step-num">1</div><div class="step-content">Open <strong>https://console.cloud.google.com</strong> and sign in with your Google account</div></div>
-<div class="step"><div class="step-num">2</div><div class="step-content">At the top, click the project dropdown (says "Select a project")</div></div>
-<div class="step"><div class="step-num">3</div><div class="step-content">Click <strong>"New Project"</strong> (top right of popup)</div></div>
-<div class="step"><div class="step-num">4</div><div class="step-content"><strong>Project name</strong>: type <code>lead-dispatcher</code></div></div>
-<div class="step"><div class="step-num">5</div><div class="step-content">Click <strong>"Create"</strong></div></div>
-<div class="step"><div class="step-num">6</div><div class="step-content">Wait 10 seconds, then click the bell icon (🔔 top right) → <strong>"Select project"</strong></div></div>
-
-<div class="callout callout-tip">
-    <span class="callout-icon">✅</span> You automatically get <strong>$300 free credit</strong> valid for 90 days. You won't be charged anything.
-</div>
-
-<div class="body-text" style="margin-top:18px"><strong>2B. Turn on 4 services</strong></div>
-<div class="body-text">For each one: search the name → click the result → click <strong>"Enable"</strong></div>
-<div class="step"><div class="step-num">1</div><div class="step-content">Search <code>Cloud Run API</code> → Enable</div></div>
-<div class="step"><div class="step-num">2</div><div class="step-content">Search <code>Cloud Build API</code> → Enable</div></div>
-<div class="step"><div class="step-num">3</div><div class="step-content">Search <code>Cloud Scheduler API</code> → Enable</div></div>
-<div class="step"><div class="step-num">4</div><div class="step-content">Search <code>Artifact Registry API</code> → Enable</div></div>
-
-<div class="body-text" style="margin-top:18px"><strong>2C. Generate 3 secret keys</strong></div>
-<div class="body-text">Your app needs secret keys to keep passwords and data safe. Use free web tools to generate them:</div>
-
-<div class="body-text" style="margin-top:8px"><strong>CRON SECRET</strong> (for the email worker):</div>
+<div class="body-text"><strong>Key 1: CRON SECRET</strong> (for the email worker)</div>
 <div class="step"><div class="step-num">1</div><div class="step-content">Go to <strong>https://www.random.org/strings</strong></div></div>
 <div class="step"><div class="step-num">2</div><div class="step-content">Set: Length = <code>32</code>, Strings = <code>1</code>, Character set = <code>Alphanumeric</code></div></div>
 <div class="step"><div class="step-num">3</div><div class="step-content">Click <strong>"Get Strings"</strong> → copy the result</div></div>
 
-<div class="body-text" style="margin-top:8px"><strong>JWT SECRET + ENCRYPTION KEY</strong> (for passwords):</div>
+<div class="body-text" style="margin-top:12px"><strong>Key 2: JWT SECRET</strong> (for user passwords)</div>
 <div class="step"><div class="step-num">1</div><div class="step-content">Go to <strong>https://www.allkeysgenerator.com/Random/Security-Encryption-Key-Generator.aspx</strong></div></div>
 <div class="step"><div class="step-num">2</div><div class="step-content">Set key size to <code>256-bit</code> and click <strong>"Generate"</strong></div></div>
-<div class="step"><div class="step-num">3</div><div class="step-content">Copy the hex string — this is your <strong>JWT SECRET</strong></div></div>
-<div class="step"><div class="step-num">4</div><div class="step-content">Click Generate again → copy — this is your <strong>ENCRYPTION KEY</strong></div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Copy the hex string</div></div>
+
+<div class="body-text" style="margin-top:12px"><strong>Key 3: ENCRYPTION KEY</strong> (for email account passwords)</div>
+<div class="step"><div class="step-num">1</div><div class="step-content">On the same page, click <strong>"Generate"</strong> again</div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Copy the new hex string</div></div>
 
 <div class="callout callout-warn">
-    <span class="callout-icon">⚠️</span> Save all 3 secrets somewhere safe. You'll need them in the next step.
+    <span class="callout-icon">⚠️</span> Save all 3 keys somewhere safe. You'll need them in the next step.
 </div>
 
 <!-- ─── STEP 3 ─── -->
 <div class="chapter-header">
-    <div class="chapter-tag">Step 3 · 15 minutes</div>
-    <div class="chapter-title">Deploy Your Backend</div>
-    <div class="chapter-subtitle">This puts your backend code on Google's servers so it can send emails</div>
+    <div class="chapter-tag">Step 3 · 10 minutes</div>
+    <div class="chapter-title">Deploy Your Backend (Render)</div>
+    <div class="chapter-subtitle">This puts your backend code on Render's servers — no credit card needed</div>
     <div class="divider"></div>
 </div>
 
-<div class="body-text"><strong>3A. Open Cloud Run</strong></div>
-<div class="step"><div class="step-num">1</div><div class="step-content">In Google Cloud Console, search <code>Cloud Run</code> → click it</div></div>
-<div class="step"><div class="step-num">2</div><div class="step-content">Click <strong>"Create Service"</strong> (or "Deploy to Cloud Run")</div></div>
+<div class="body-text"><strong>3A. Sign up for Render</strong></div>
+<div class="step"><div class="step-num">1</div><div class="step-content">Open <strong>https://render.com</strong> in your browser</div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Click <strong>"Get Started"</strong> (top right)</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Click <strong>"Sign up with GitHub"</strong></div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content">Authorize Render to access your GitHub account</div></div>
 
-<div class="body-text" style="margin-top:12px"><strong>3B. Connect your GitHub repo</strong></div>
-<div class="step"><div class="step-num">1</div><div class="step-content">Under <strong>"Source"</strong>, select <strong>"Deploy from source"</strong></div></div>
-<div class="step"><div class="step-num">2</div><div class="step-content">Click <strong>"Connect to GitHub"</strong> (or "Set up with Cloud Build")</div></div>
-<div class="step"><div class="step-num">3</div><div class="step-content">Authorize Google Cloud Build to access your GitHub</div></div>
-<div class="step"><div class="step-num">4</div><div class="step-content">Select your GitHub account</div></div>
-<div class="step"><div class="step-num">5</div><div class="step-content">Find and select <strong>cold-outreach-backend</strong> repository</div></div>
-<div class="step"><div class="step-num">6</div><div class="step-content">Click <strong>"Next"</strong></div></div>
+<div class="body-text" style="margin-top:12px"><strong>3B. Create a new web service</strong></div>
+<div class="step"><div class="step-num">1</div><div class="step-content">On your Render dashboard, click <strong>"New +"</strong> (top right) → <strong>"Web Service"</strong></div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Find <strong>cold-outreach-backend</strong> in the repo list → click <strong>"Connect"</strong></div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Fill in the configuration:<br>• <strong>Name</strong>: <code>cold-outreach-api</code><br>• <strong>Region</strong>: pick the closest to you (Oregon, Frankfurt, etc.)<br>• <strong>Branch</strong>: <code>main</code><br>• <strong>Runtime</strong>: <strong>Docker</strong> (Render auto-detects the Dockerfile)<br>• <strong>Instance Type</strong>: <strong>Free</strong> ($0/month)</div></div>
 
-<div class="body-text" style="margin-top:12px"><strong>3C. Configure the build</strong></div>
-<div class="step"><div class="step-num">1</div><div class="step-content"><strong>Branch</strong>: <code>main</code></div></div>
-<div class="step"><div class="step-num">2</div><div class="step-content"><strong>Build type</strong>: should auto-detect the Dockerfile — leave as is</div></div>
-<div class="step"><div class="step-num">3</div><div class="step-content">Click <strong>"Next"</strong></div></div>
-
-<div class="body-text" style="margin-top:12px"><strong>3D. Configure the service</strong></div>
-<div class="step"><div class="step-num">1</div><div class="step-content"><strong>Service name</strong>: <code>cold-outreach-api</code></div></div>
-<div class="step"><div class="step-num">2</div><div class="step-content"><strong>Region</strong>: <code>us-central1</code> (or closest to you)</div></div>
-<div class="step"><div class="step-num">3</div><div class="step-content"><strong>Authentication</strong>: Select <strong>"Allow unauthenticated invocations"</strong></div></div>
-<div class="step"><div class="step-num">4</div><div class="step-content">Expand <strong>"Container, Variables & Secrets, Networking, Security"</strong>:<br>• <strong>Container port</strong>: <code>8080</code><br>• <strong>Memory</strong>: <code>512 MiB</code><br>• <strong>CPU</strong>: <code>1</code></div></div>
-<div class="step"><div class="step-num">5</div><div class="step-content">Click the <strong>"VARIABLES & SECRETS"</strong> tab → click <strong>"Add Variable"</strong> for each of these:</div></div>
+<div class="body-text" style="margin-top:12px"><strong>3C. Add environment variables</strong></div>
+<div class="body-text">Scroll down to the <strong>"Environment"</strong> section. Click <strong>"Add Environment Variable"</strong> for each of these 6 variables:</div>
 
 <table class="env-table">
-    <tr><th>Variable Name</th><th>Value</th></tr>
+    <tr><th>Key</th><th>Value</th></tr>
     <tr><td>DATABASE_URL</td><td>Paste your DATABASE LINK from Step 1</td></tr>
-    <tr><td>JWT_SECRET</td><td>Paste your JWT SECRET from Step 2C</td></tr>
-    <tr><td>ENCRYPTION_KEY</td><td>Paste your ENCRYPTION KEY from Step 2C</td></tr>
-    <tr><td>CRON_SECRET</td><td>Paste your CRON SECRET from Step 2C</td></tr>
-    <tr><td>FRONTEND_URL</td><td>https://cold-outreach-frontend.vercel.app<br><span class="muted">(we'll fix this later)</span></td></tr>
+    <tr><td>JWT_SECRET</td><td>Paste your JWT SECRET from Step 2</td></tr>
+    <tr><td>ENCRYPTION_KEY</td><td>Paste your ENCRYPTION KEY from Step 2</td></tr>
+    <tr><td>CRON_SECRET</td><td>Paste your CRON SECRET from Step 2</td></tr>
+    <tr><td>FRONTEND_URL</td><td>https://cold-outreach-frontend.vercel.app<br><span class="muted">(we'll fix this later in Step 5)</span></td></tr>
     <tr><td>PUBLIC_BASE_URL</td><td>https://cold-outreach-frontend.vercel.app<br><span class="muted">(same as above)</span></td></tr>
 </table>
 
-<div class="step"><div class="step-num">6</div><div class="step-content">Under <strong>"Autoscaling"</strong>:<br>• <strong>Minimum instances</strong>: <code>0</code> (saves money — scales to zero when idle)<br>• <strong>Maximum instances</strong>: <code>3</code></div></div>
-<div class="step"><div class="step-num">7</div><div class="step-content">Click <strong>"Create"</strong> or <strong>"Deploy"</strong></div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content">Click <strong>"Deploy Web Service"</strong> at the bottom</div></div>
 
 <div class="callout callout-info">
-    <span class="callout-icon">⏳</span> Google will build your code (takes 3–5 minutes). You'll see a log stream — don't worry, just wait. When done, you'll see a green checkmark ✅
+    <span class="callout-icon">⏳</span> Render will build your code (takes 3–5 minutes). You'll see a live log stream. When done, the status changes to <strong>"Live"</strong> with a green dot.
 </div>
 
-<div class="body-text" style="margin-top:14px"><strong>3E. Copy your Backend URL</strong></div>
-<div class="body-text">At the top of the page, you'll see a URL like:</div>
-<div class="code-block"><code>https://cold-outreach-api-1234567-uc.a.run.app</code></div>
+<div class="body-text" style="margin-top:14px"><strong>3D. Copy your Backend URL</strong></div>
+<div class="step"><div class="step-num">1</div><div class="step-content">At the top of your service page, you'll see a URL like:<br><code>https://cold-outreach-api-abc123.onrender.com</code></div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Click the URL to open it — you should see: <code>{"ok":true,"service":"lead-dispatcher-backend",...}</code></div></div>
 
 <div class="callout callout-warn">
-    <span class="callout-icon">⚠️</span> <strong>Copy this URL!</strong> This is your <strong>BACKEND URL</strong>. You'll need it in Steps 4 and 6.
+    <span class="callout-icon">⚠️</span> <strong>Copy this URL!</strong> This is your <strong>BACKEND URL</strong>. You'll need it in Steps 4 and 5.
+</div>
+
+<div class="callout callout-info">
+    <span class="callout-icon">💡</span> <strong>Free tier note:</strong> Render's free tier "spins down" your service after 15 minutes of inactivity. The first request after spin-down takes ~30 seconds to wake up. This is normal and won't affect email sending (the cron job keeps it active).
 </div>
 
 <!-- ─── STEP 4 ─── -->
 <div class="chapter-header">
-    <div class="chapter-tag">Step 4 · 5 minutes</div>
+    <div class="chapter-tag">Step 4 · 3 minutes</div>
     <div class="chapter-title">Set Up the Email Worker</div>
-    <div class="chapter-subtitle">Makes your app check every 5 minutes for emails to send and replies to process</div>
+    <div class="chapter-subtitle">Use cron-job.org to trigger email sending every 5 minutes — free, no signup</div>
     <div class="divider"></div>
 </div>
 
-<div class="body-text"><strong>4A. Create a Cloud Scheduler job</strong></div>
-<div class="step"><div class="step-num">1</div><div class="step-content">In Google Cloud Console, search <code>Cloud Scheduler</code> → click it</div></div>
-<div class="step"><div class="step-num">2</div><div class="step-content">Click <strong>"Create Job"</strong></div></div>
-<div class="step"><div class="step-num">3</div><div class="step-content">Fill in:<br>• <strong>Name</strong>: <code>lead-dispatcher-worker</code><br>• <strong>Description</strong>: <code>Sends emails and checks replies every 5 minutes</code><br>• <strong>Frequency</strong>: type <code>*/5 * * * *</code> (this means "every 5 minutes")<br>• <strong>Timezone</strong>: pick your timezone</div></div>
-<div class="step"><div class="step-num">4</div><div class="step-content">Click <strong>"Continue"</strong></div></div>
-<div class="step"><div class="step-num">5</div><div class="step-content">Under <strong>"Configure the execution"</strong>:<br>• <strong>Target type</strong>: select <strong>"HTTP"</strong><br>• <strong>URL</strong>: type your backend URL + <code>/api/cron/</code> + your CRON SECRET<br>&nbsp;&nbsp;Example: <code>https://cold-outreach-api-1234567-uc.a.run.app/api/cron/AbCdEf123456</code><br>&nbsp;&nbsp;(Replace with your actual BACKEND URL and CRON SECRET)<br>• <strong>HTTP method</strong>: <strong>POST</strong><br>• <strong>Headers</strong>: click "Add header" → Key: <code>Content-Type</code>, Value: <code>application/json</code><br>• <strong>Body</strong>: type <code>{}</code></div></div>
-<div class="step"><div class="step-num">6</div><div class="step-content">Click <strong>"Create"</strong></div></div>
+<div class="body-text">Your app needs to check every 5 minutes: "Are there emails to send? Any new replies?" We use cron-job.org for this — it's free and doesn't require an account.</div>
 
-<div class="body-text" style="margin-top:14px"><strong>4B. Test it</strong></div>
-<div class="step"><div class="step-num">1</div><div class="step-content">You'll see your job in the list</div></div>
-<div class="step"><div class="step-num">2</div><div class="step-content">Click the <strong>three dots</strong> (⋮) on the right → <strong>"Run now"</strong></div></div>
-<div class="step"><div class="step-num">3</div><div class="step-content">Wait 10 seconds, then check "Last run result" — should say "Success" ✅</div></div>
+<div class="step"><div class="step-num">1</div><div class="step-content">Open <strong>https://cron-job.org</strong> in your browser</div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content">Click <strong>"Sign Up"</strong> (top right) — quick email + password signup</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">After logging in, click <strong>"Create Cronjob"</strong></div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content">Fill in:<br>• <strong>Title</strong>: <code>Lead Dispatcher Worker</code><br>• <strong>URL</strong>: type your BACKEND URL + <code>/api/cron/</code> + your CRON SECRET<br>&nbsp;&nbsp;Example: <code>https://cold-outreach-api-abc123.onrender.com/api/cron/AbCdEf123456</code><br>&nbsp;&nbsp;(Replace with your actual BACKEND URL and CRON SECRET)<br>• <strong>Execution Schedule</strong>: select <strong>"Every 5 minutes"</strong><br>• <strong>Request Method</strong>: <strong>POST</strong></div></div>
+<div class="step"><div class="step-num">5</div><div class="step-content">Click <strong>"Create"</strong></div></div>
 
 <div class="callout callout-tip">
-    <span class="callout-icon">💡</span> If it fails, check: Is the URL correct? (should end with <code>/api/cron/YOUR_SECRET</code>). Is the method POST? Did you include the CRON_SECRET in the URL?
+    <span class="callout-icon">✅</span> That's it! cron-job.org will now ping your backend every 5 minutes. Your app will automatically send queued emails, check for replies, run warm-up, and break sequences when leads reply.
 </div>
 
 <!-- ─── STEP 5 ─── -->
@@ -672,7 +653,7 @@ html, body {
 
 <table class="env-table">
     <tr><th>Name</th><th>Value</th></tr>
-    <tr><td>NEXT_PUBLIC_API_URL</td><td>Paste your BACKEND URL from Step 3E<br>(like https://cold-outreach-api-1234567-uc.a.run.app)</td></tr>
+    <tr><td>NEXT_PUBLIC_API_URL</td><td>Paste your BACKEND URL from Step 3D<br>(like https://cold-outreach-api-abc123.onrender.com)</td></tr>
 </table>
 
 <div class="step"><div class="step-num">4</div><div class="step-content">Click <strong>"Deploy"</strong></div></div>
@@ -691,16 +672,15 @@ html, body {
 <div class="chapter-header">
     <div class="chapter-tag">Step 6 · 2 minutes</div>
     <div class="chapter-title">Connect Frontend and Backend</div>
-    <div class="chapter-subtitle">Fix the CORS security rule so your website can talk to your backend</div>
+    <div class="chapter-subtitle">Update the backend's FRONTEND_URL to your actual Vercel URL</div>
     <div class="divider"></div>
 </div>
-<div class="step"><div class="step-num">1</div><div class="step-content">Go back to <strong>Google Cloud Console</strong> → <strong>Cloud Run</strong></div></div>
+<div class="step"><div class="step-num">1</div><div class="step-content">Go back to <strong>https://render.com</strong> → your dashboard</div></div>
 <div class="step"><div class="step-num">2</div><div class="step-content">Click your <code>cold-outreach-api</code> service</div></div>
-<div class="step"><div class="step-num">3</div><div class="step-content">Click <strong>"Edit & Deploy New Revision"</strong> (top right)</div></div>
-<div class="step"><div class="step-num">4</div><div class="step-content">Scroll to <strong>"Variables & Secrets"</strong> section</div></div>
-<div class="step"><div class="step-num">5</div><div class="step-content">Update these two variables to your actual Vercel URL:<br>• <code>FRONTEND_URL</code> = your WEBSITE URL<br>• <code>PUBLIC_BASE_URL</code> = your WEBSITE URL</div></div>
-<div class="step"><div class="step-num">6</div><div class="step-content">Click <strong>"Deploy"</strong> at the bottom</div></div>
-<div class="step"><div class="step-num">7</div><div class="step-content">Wait 2 minutes for redeployment</div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Click <strong>"Environment"</strong> (left sidebar)</div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content">Update these two variables to your actual Vercel URL:<br>• <code>FRONTEND_URL</code> = your WEBSITE URL (like <code>https://cold-outreach-frontend-abc123.vercel.app</code>)<br>• <code>PUBLIC_BASE_URL</code> = your WEBSITE URL (same)</div></div>
+<div class="step"><div class="step-num">5</div><div class="step-content">Click <strong>"Save Changes"</strong></div></div>
+<div class="step"><div class="step-num">6</div><div class="step-content">Render will automatically redeploy (takes 1–2 minutes)</div></div>
 
 <!-- ─── STEP 7 ─── -->
 <div class="chapter-header">
@@ -774,9 +754,9 @@ html, body {
 </div>
 <div class="step"><div class="step-num">1</div><div class="step-content">Go to <strong>https://platform.deepseek.com</strong> → sign up → add $5 credit (very cheap, lasts months)</div></div>
 <div class="step"><div class="step-num">2</div><div class="step-content">Copy your API key (starts with <code>sk-</code>)</div></div>
-<div class="step"><div class="step-num">3</div><div class="step-content">In Google Cloud Run, edit your <code>cold-outreach-api</code> service</div></div>
-<div class="step"><div class="step-num">4</div><div class="step-content">Add environment variable: <code>DEEPSEEK_API_KEY</code> = <code>sk-your-key-here</code></div></div>
-<div class="step"><div class="step-num">5</div><div class="step-content">Click <strong>"Deploy"</strong></div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content">Go to Render → your <code>cold-outreach-api</code> service → <strong>Environment</strong></div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content">Add environment variable: Key = <code>DEEPSEEK_API_KEY</code>, Value = <code>sk-your-key-here</code></div></div>
+<div class="step"><div class="step-num">5</div><div class="step-content">Click <strong>"Save Changes"</strong> → Render auto-redeploys</div></div>
 <div class="step"><div class="step-num">6</div><div class="step-content">In your app: <strong>Settings → Integrations → DeepSeek LLM → Test Connection</strong></div></div>
 
 <!-- ─── STEP 12 ─── -->
@@ -816,9 +796,9 @@ html, body {
 <div class="callout callout-warn">
     <span class="callout-icon">🔧</span> <strong>"Failed to fetch" or blank page</strong><br>
     Your website can't reach your backend. Check:<br>
-    1. In Vercel: is <code>NEXT_PUBLIC_API_URL</code> set to your BACKEND URL?<br>
-    2. In Cloud Run: is <code>FRONTEND_URL</code> set to your Vercel URL?<br>
-    3. Did you redeploy after changing them?
+    1. In Vercel: is <code>NEXT_PUBLIC_API_URL</code> set to your Render BACKEND URL?<br>
+    2. In Render: is <code>FRONTEND_URL</code> set to your Vercel URL?<br>
+    3. Did Render finish deploying (status = "Live")?
 </div>
 
 <div class="callout callout-info">
@@ -833,26 +813,22 @@ html, body {
 </div>
 
 <div class="callout callout-info">
-    <span class="callout-icon">🔧</span> <strong>Cloud Run deployment fails</strong><br>
-    1. Make sure all 4 APIs are enabled (Step 2B)<br>
-    2. Make sure you selected "Allow unauthenticated invocations"<br>
-    3. Make sure your GitHub repo is connected properly
+    <span class="callout-icon">🔧</span> <strong>Render service is slow / "spun down"</strong><br>
+    Free tier services sleep after 15 min of inactivity. The first request takes ~30 seconds to wake up. The cron-job.org worker (Step 4) keeps it active by pinging every 5 minutes.
 </div>
 
 <div class="callout callout-warn">
-    <span class="callout-icon">🔧</span> <strong>Worker doesn't seem to run</strong><br>
-    1. Go to Google Cloud Console → Cloud Scheduler<br>
-    2. Click your <code>lead-dispatcher-worker</code> job<br>
-    3. Click "Run now" to test<br>
-    4. Check the logs for errors<br>
-    5. Verify the URL is correct: <code>https://YOUR-BACKEND-URL/api/cron/YOUR-CRON-SECRET</code>
-</div>
-
-<div class="callout callout-info">
     <span class="callout-icon">🔧</span> <strong>Email sending fails</strong><br>
     1. Gmail: You MUST use an App Password, not your regular password<br>
     2. Daily cap too high: Start with 50, not 100<br>
     3. Account needs warm-up: New accounts should warm up for 1–2 weeks
+</div>
+
+<div class="callout callout-info">
+    <span class="callout-icon">🔧</span> <strong>Render build fails</strong><br>
+    1. Make sure the Dockerfile is in the root of the backend repo<br>
+    2. Make sure the branch is <code>main</code><br>
+    3. Check the build logs in Render for specific errors
 </div>
 
 <!-- ─── COST ─── -->
@@ -864,16 +840,16 @@ html, body {
 
 <table class="cost-table">
     <tr><th>Service</th><th>Free Amount</th><th>What You Use</th><th>Cost</th></tr>
+    <tr><td>Render (backend)</td><td>750 hours/month free</td><td>1 small service</td><td>$0</td></tr>
     <tr><td>Vercel (website)</td><td>Free forever</td><td>Small site</td><td>$0</td></tr>
-    <tr><td>Google Cloud Run (backend)</td><td>240k vCPU-sec/month</td><td>~5% of free tier</td><td>$0</td></tr>
-    <tr><td>Google Cloud Scheduler</td><td>3 jobs free</td><td>1 job</td><td>$0</td></tr>
     <tr><td>Neon (database)</td><td>0.5GB free</td><td>&lt;100MB</td><td>$0</td></tr>
+    <tr><td>cron-job.org (worker)</td><td>Unlimited free</td><td>1 cron job</td><td>$0</td></tr>
     <tr><td colspan="3">Total Monthly Cost</td><td>$0/month</td></tr>
 </table>
 
-<div class="body-text">After 90 days: Google's $300 credit expires, but the always-free tier still covers your usage. Expected cost: <strong>$0–8/month</strong>.</div>
+<div class="body-text">No credit card required. No surprise charges. All services have generous free tiers that cover personal/small team usage.</div>
 
-<div class="body-text">Optional: Add Cloud NAT (~$33/month) for a fixed IP address — improves email deliverability but not required.</div>
+<div class="body-text">If you need more power later: Render paid tier starts at $7/month (always-on, no spin-down), Neon paid tier starts at $19/month (more storage + compute).</div>
 
 <!-- ─── QUICK REFERENCE ─── -->
 <div class="chapter-header">
@@ -889,8 +865,9 @@ html, body {
     <div class="ref-line"><strong>JWT SECRET:</strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;_____________________________________</div>
     <div class="ref-line"><strong>ENCRYPTION KEY:</strong>&nbsp;&nbsp;_____________________________________</div>
     <div class="ref-line"><strong>CRON SECRET:</strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;_____________________________________</div>
-    <div class="ref-line"><strong>BACKEND URL:</strong>&nbsp;&nbsp;&nbsp;&nbsp;https://cold-outreach-api-______.a.run.app</div>
+    <div class="ref-line"><strong>BACKEND URL:</strong>&nbsp;&nbsp;&nbsp;&nbsp;https://cold-outreach-api-______.onrender.com</div>
     <div class="ref-line"><strong>WEBSITE URL:</strong>&nbsp;&nbsp;&nbsp;&nbsp;https://cold-outreach-frontend-______.vercel.app</div>
+    <div class="ref-line"><strong>CRON URL:</strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;https://cold-outreach-api-______.onrender.com/api/cron/YOUR_CRON_SECRET</div>
 </div>
 
 </div>
@@ -899,12 +876,12 @@ html, body {
 <div class="ending">
     <div class="ending-icon">🎉</div>
     <div class="ending-title">You're Done!</div>
-    <div class="ending-subtitle">You've built your own cold email automation platform without touching a terminal. Now go send some emails!</div>
+    <div class="ending-subtitle">You've built your own cold email automation platform without a terminal or credit card. Now go send some emails!</div>
     <div class="ending-links">
         <div class="ending-link">Frontend: github.com/interiorvisualsd-maker/cold-outreach-frontend</div>
         <div class="ending-link">Backend: github.com/interiorvisualsd-maker/cold-outreach-backend</div>
     </div>
-    <div class="ending-footer">Lead Dispatcher · Zero-Cost Private Cold Email Automation</div>
+    <div class="ending-footer">Lead Dispatcher · Render Edition · Zero-Cost Private Cold Email Automation</div>
 </div>
 
 </body>
