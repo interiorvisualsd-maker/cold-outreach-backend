@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import Papa from 'papaparse'
 import { db } from '../lib/db'
+import { validateEmail } from '../lib/email-validator'
 
 const app = new Hono()
 
@@ -205,6 +206,13 @@ app.post('/import', async (c) => {
       continue
     }
     existingSet.add(email) // prevent intra-batch dupes
+    // Validate email before adding (skip MX check during import for speed — use validate-leads endpoint after)
+    const domain = email.split('@')[1]?.toLowerCase()
+    if (domain && (isDisposableDomain(domain) || !isValidSyntaxQuick(email))) {
+      invalidCount++
+      skipped.push({ row, reason: 'invalid_or_disposable_email' })
+      continue
+    }
     toCreate.push({
       campaignId,
       email,
@@ -256,3 +264,18 @@ app.get('/template', (c) => {
 })
 
 export default app
+
+
+// Quick checks (no network — fast)
+function isDisposableDomain(domain: string): boolean {
+  const disposable = new Set([
+    'mailinator.com', 'guerrillamail.com', 'tempmail.com', 'throwaway.email',
+    '10minutemail.com', 'temp-mail.org', 'fakeinbox.com', 'getnada.com',
+    'yopmail.com', 'sharklasers.com', 'example.com', 'example.org', 'test.com',
+  ])
+  return disposable.has(domain)
+}
+
+function isValidSyntaxQuick(email: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)
+}

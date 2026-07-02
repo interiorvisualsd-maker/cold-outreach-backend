@@ -1200,3 +1200,132 @@ app.post('/clear-all', async (c) => {
 })
 
 export default app
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EMAIL VALIDATION — detect bad emails BEFORE sending
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { validateEmail, validateEmailBatch, isValidSyntax, isDisposable, isRoleBased, hasMxRecords } from '../lib/email-validator'
+
+// POST /api/extras/validate-emails — validate a list of emails (from CSV import preview)
+app.post('/validate-emails', async (c) => {
+  const body = await c.req.json()
+  const { emails } = body as { emails: string[] }
+  if (!emails || !Array.isArray(emails) || emails.length === 0) {
+    return c.json({ error: 'emails array required' }, 400)
+  }
+
+  // Limit to 100 emails per request (prevent timeout)
+  const limited = emails.slice(0, 100)
+  const results = await validateEmailBatch(limited, 5)
+
+  const summary = {
+    total: results.length,
+    valid: results.filter(r => r.valid && r.category !== 'role_based').length,
+    roleBased: results.filter(r => r.category === 'role_based').length,
+    invalid: results.filter(r => !r.valid).length,
+    disposable: results.filter(r => r.category === 'disposable').length,
+    noMx: results.filter(r => r.category === 'no_mx').length,
+    badSyntax: results.filter(r => r.category === 'invalid_syntax').length,
+  }
+
+  return c.json({ results, summary })
+})
+
+// POST /api/extras/validate-single — validate a single email
+app.post('/validate-single', async (c) => {
+  const body = await c.req.json()
+  const { email } = body
+  if (!email) return c.json({ error: 'email required' }, 400)
+
+  const result = await validateEmail(email)
+  return c.json(result)
+})
+
+// POST /api/extras/campaigns/:id/validate-leads — validate all leads in a campaign
+app.post('/campaigns/:id/validate-leads', async (c) => {
+  const campaignId = c.req.param('id')
+  const leads = await db.lead.findMany({
+    where: { campaignId, status: { in: ['pending', 'step1_sent', 'step2_sent', 'step3_sent'] } },
+    select: { id: true, email: true },
+  })
+
+  if (leads.length === 0) {
+    return c.json({ ok: true, message: 'No leads to validate', validated: 0 })
+  }
+
+  // Validate in batches of 5 (MX lookups take ~1-2s each)
+  let validCount = 0
+  let suppressedCount = 0
+  const suppressed: any[] = []
+
+  for (let i = 0; i < leads.length; i += 5) {
+    const batch = leads.slice(i, i + 5)
+    const results = await validateEmailBatch(batch.map(l => l.email), 5)
+
+    for (let j = 0; j < batch.length; j++) {
+      const lead = batch[j]
+      const result = results[j]
+
+      if (!result.valid) {
+        // Suppress the lead
+        await db.suppressionList.upsert({
+          where: { email_reason: { email: lead.email.toLowerCase(), reason: 'bounce' } },
+          create: {
+            email: lead.email.toLowerCase(),
+            reason: 'bounce',
+            source: `Pre-send validation: ${result.reason}`,
+          },
+          update: {},
+        })
+        await db.lead.update({
+          where: { id: lead.id },
+          data: { status: 'suppressed' },
+        })
+        await db.scheduledEmail.updateMany({
+          where: { leadId: lead.id, status: 'queued' },
+          data: { status: 'cancelled' },
+        })
+        suppressed.push({ email: lead.email, reason: result.reason })
+        suppressedCount++
+      } else {
+        validCount++
+      }
+    }
+  }
+
+  return c.json({
+    ok: true,
+    validated: leads.length,
+    valid: validCount,
+    suppressed: suppressedCount,
+    suppressedLeads: suppressed.slice(0, 50), // first 50 for display
+  })
+})
+
+// GET /api/extras/campaigns/:id/validation-stats — get validation status for a campaign
+app.get('/campaigns/:id/validation-stats', async (c) => {
+  const campaignId = c.req.param('id')
+  const leads = await db.lead.findMany({
+    where: { campaignId },
+    select: { email: true, status: true },
+  })
+
+  const stats = {
+    total: leads.length,
+    pending: leads.filter(l => l.status === 'pending').length,
+    suppressed: leads.filter(l => l.status === 'suppressed').length,
+    bounced: leads.filter(l => l.status === 'bounced').length,
+    roleBased: 0,
+    invalidDomain: 0,
+  }
+
+  // Quick check for role-based and disposable (no MX lookup needed)
+  for (const lead of leads) {
+    if (isRoleBased(lead.email)) stats.roleBased++
+    const domain = lead.email.split('@')[1]?.toLowerCase()
+    if (domain && isDisposable(domain)) stats.invalidDomain++
+  }
+
+  return c.json(stats)
+})
