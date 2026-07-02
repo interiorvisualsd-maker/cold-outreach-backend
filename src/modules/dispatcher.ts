@@ -169,7 +169,7 @@ export async function processSendBatch(batchSize = 50): Promise<{
       const footer = `\n\n---\nTo unsubscribe, reply with "unsubscribe" or visit ${unsubLink}`
       const textBody = wrappedBody + footer
       // HTML body with tracking pixel
-      const htmlBody = `${wrappedBody.replace(/\n/g, '<br>\n')}<br><br>---<br>To unsubscribe, reply with "unsubscribe" or <a href="${unsubLink}">click here</a>.<img src="${pixelUrl}" width="1" height="1" alt="" style="display:none">`
+      const htmlBody = `${wrappedBody.replace(/\n/g, '<br>\n')}<br><br>---<br>To unsubscribe, reply with "unsubscribe" or <a href="${unsubLink}">click here</a>.`
 
       const { messageId } = await sendMail(account, {
         to: item.lead.email,

@@ -24,6 +24,18 @@ const BOUNCE_PATTERNS = [
   /no such (user|address)/i,
   /address rejected/i,
   /550 /,
+  /address not found/i,
+  /email doesn.?t exist/i,
+  /email is a catch/i,
+  /sender not allowed/i,
+  /action required/i,
+  /tracking pixel/i,
+  /unknown user/i,
+  /recipient (was )?rejected/i,
+  /spam (detected|rejected)/i,
+  /blocked/i,
+  /quota exceeded/i,
+  /temporarily unavailable/i,
 ]
 
 const OOO_PATTERNS = [
@@ -83,24 +95,28 @@ export async function processInboundReplies(): Promise<{
 
         const replyType = detectReplyType(msg.subject, msg.text)
 
-        // Create Reply record (linked to lead if found)
-        const reply = await db.reply.create({
-          data: {
-            leadId: lead?.id || 'unknown', // will skip if no lead
-            fromEmail: msg.from,
-            toEmail: account.emailAddress,
-            subject: msg.subject,
-            body: msg.text,
-            messageId: msg.messageId,
-            inReplyTo: msg.inReplyTo,
-            receivedAt: msg.date,
-            sentiment: replyType === 'normal' ? null : replyType,
-          },
-        }).catch(() => null)
+        if (!lead) {
+          // Unmatched inbound (bounce notification, system message, etc.)
+          // Log it but don't create a Reply record (no lead to link to)
+          await db.emailLog.create({
+            data: {
+              direction: 'inbound',
+              smtpAccountId: account.id,
+              toEmail: account.emailAddress,
+              fromEmail: msg.from,
+              subject: msg.subject,
+              body: msg.text,
+              messageId: msg.messageId,
+              inReplyTo: msg.inReplyTo,
+              isReply: true,
+              receivedAt: msg.date,
+            },
+          }).catch(() => null)
+          await markMessageRead(account, msg.folder, msg.uid)
+          continue
+        }
 
-        if (!lead) continue // unmatched inbound — logged but no sequence to break
-
-        // Re-create reply with proper leadId
+        // Create Reply record (lead found — safe to create)
         await db.reply.create({
           data: {
             leadId: lead.id,
