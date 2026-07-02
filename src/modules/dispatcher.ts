@@ -40,8 +40,21 @@ export async function pickAccountForSend(now: Date = new Date()): Promise<SmtpAc
 
 // Fetch the next batch of emails to send (only within sending window)
 function isWithinSendingWindow(startHour: number, endHour: number, now: Date, timezone: string): boolean {
-  // Simple hour-based check in local time. Production should use a tz library.
-  const hour = now.getHours()
+  // Convert current UTC time to the campaign's timezone
+  // Using Intl.DateTimeFormat to get the hour in the target timezone
+  let hour: number
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone || 'UTC',
+      hour: 'numeric',
+      hour12: false,
+    })
+    hour = parseInt(formatter.format(now), 10)
+  } catch {
+    // Invalid timezone, fall back to UTC
+    hour = now.getUTCHours()
+  }
+  
   if (startHour <= endHour) {
     return hour >= startHour && hour < endHour
   }
@@ -77,11 +90,27 @@ export async function processSendBatch(batchSize = 50): Promise<{
   for (const item of due) {
     // Check sending window for this campaign
     if (!isWithinSendingWindow(item.campaign.sendingWindowStart, item.campaign.sendingWindowEnd, now, item.campaign.timezone)) {
-      // Reschedule to next window start
-      const next = new Date(now)
-      next.setHours(item.campaign.sendingWindowStart, 0, 0, 0)
-      if (next <= now) next.setDate(next.getDate() + 1)
-      // Add small jitter
+      // Reschedule to next window start in the campaign's timezone
+      // Calculate when the next window opens
+      const tz = item.campaign.timezone || 'UTC'
+      let hoursUntilOpen = 0
+      try {
+        const formatter = new Intl.DateTimeFormat('en-US', {
+          timeZone: tz,
+          hour: 'numeric',
+          hour12: false,
+        })
+        const currentHour = parseInt(formatter.format(now), 10)
+        if (item.campaign.sendingWindowStart > currentHour) {
+          hoursUntilOpen = item.campaign.sendingWindowStart - currentHour
+        } else {
+          hoursUntilOpen = 24 - currentHour + item.campaign.sendingWindowStart
+        }
+      } catch {
+        hoursUntilOpen = 1
+      }
+      const next = new Date(now.getTime() + hoursUntilOpen * 60 * 60 * 1000)
+      // Add small jitter (up to 30 min)
       next.setMinutes(next.getMinutes() + Math.floor(Math.random() * 30))
       await db.scheduledEmail.update({
         where: { id: item.id },

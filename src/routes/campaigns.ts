@@ -39,7 +39,7 @@ app.post('/', async (c) => {
       name,
       sendingWindowStart: sendingWindowStart ?? 9,
       sendingWindowEnd: sendingWindowEnd ?? 17,
-      timezone: timezone ?? 'UTC',
+      timezone: timezone ?? 'America/New_York',
       fromNameOverride: fromNameOverride ?? null,
     },
   })
