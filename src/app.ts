@@ -43,12 +43,18 @@ app.all('/api/cron/:secret', async (c) => {
   }
   try {
     const { processSendBatch } = await import('./modules/dispatcher')
-    const { processWarmupBatch, processWarmupInbound } = await import('./modules/warmup')
+    const { processWarmupBatch } = await import('./modules/warmup')
     const { processInboundReplies } = await import('./modules/unibox')
 
+    // Priority 1: Send campaign emails (most important)
     const sendResult = await processSendBatch(30).catch((e: any) => ({ error: e?.message }))
-    const warmupResult = await processWarmupBatch(15).catch((e: any) => ({ error: e?.message }))
-    const warmupInboundResult = await processWarmupInbound().catch((e: any) => ({ error: e?.message }))
+
+    // Priority 2: Send warmup emails (lightweight, no IMAP needed)
+    const warmupResult = await processWarmupBatch(10).catch((e: any) => ({ error: e?.message }))
+
+    // Priority 3: Check for replies (IMAP — only if we have time)
+    // Only check 1 account per tick to avoid timeout
+    // Each account gets checked on a rotating basis
     const replyResult = await processInboundReplies().catch((e: any) => ({ error: e?.message }))
 
     return c.json({
@@ -57,7 +63,6 @@ app.all('/api/cron/:secret', async (c) => {
       results: {
         sends: sendResult,
         warmup: warmupResult,
-        warmupInbound: warmupInboundResult,
         replies: replyResult,
       },
     })

@@ -12,7 +12,7 @@ import { startWorker } from './worker'
 
 const PORT = parseInt(process.env.PORT || '3001')
 console.log(`🚀 Lead Dispatcher backend running on http://localhost:${PORT}`)
-Bun.serve({ fetch: app.fetch, port: PORT })
+Bun.serve({ fetch: app.fetch, port: PORT, idleTimeout: 120 })
 
 // Start the background worker (send queue, warmup, IMAP polling)
 startWorker()
