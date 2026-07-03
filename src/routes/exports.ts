@@ -215,6 +215,36 @@ app.post('/leads/bulk', async (c) => {
   return c.json({ ok: true, action, affected })
 })
 
+// POST /api/extras/leads/:id/suppress — suppress a single lead (add to
+// SuppressionList with reason 'manual', set lead.status='suppressed',
+// cancel any queued emails). Used by the per-row "Suppress" button in
+// the campaign leads table.
+app.post('/leads/:id/suppress', async (c) => {
+  const leadId = c.req.param('id')
+  const lead = await db.lead.findUnique({
+    where: { id: leadId },
+    select: { id: true, email: true, campaign: { select: { name: true } } },
+  })
+  if (!lead) return c.json({ error: 'Lead not found' }, 404)
+  if (!lead.email) return c.json({ error: 'Lead has no email' }, 400)
+
+  const email = lead.email.toLowerCase()
+  await db.suppressionList.upsert({
+    where: { email_reason: { email, reason: 'manual' } },
+    create: { email, reason: 'manual', source: lead.campaign?.name || 'manual-suppress' },
+    update: {},
+  })
+  await db.lead.update({
+    where: { id: leadId },
+    data: { status: 'suppressed' },
+  })
+  await db.scheduledEmail.updateMany({
+    where: { leadId, status: 'queued' },
+    data: { status: 'cancelled' },
+  })
+  return c.json({ ok: true, leadId, email, status: 'suppressed' })
+})
+
 // ─────────────────────────────────────────────────────────────────────────────
 // OPEN / CLICK TRACKING
 // ─────────────────────────────────────────────────────────────────────────────

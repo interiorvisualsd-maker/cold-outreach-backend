@@ -31,12 +31,75 @@ const BOUNCE_PATTERNS = [
   /action required/i,
   /tracking pixel/i,
   /unknown user/i,
+  /recipient (address )?rejected/i,
   /recipient (was )?rejected/i,
   /spam (detected|rejected)/i,
   /blocked/i,
   /quota exceeded/i,
   /temporarily unavailable/i,
+  /does not exist/i,
+  /invalid recipient/i,
+  /permanent error/i,
+  /5\.1\.[0-9]/, // SMTP permanent failure codes
+  /5\.2\.[0-9]/,
+  /5\.4\.[0-9]/,
 ]
+
+// Extract the original recipient email from a bounce message body.
+// Bounce emails come FROM postmaster@... so we can't use msg.from to find the lead.
+// Instead, parse the bounce body for the failed recipient address.
+function extractBouncedRecipient(subject: string, body: string): string | null {
+  const text = `${subject}\n${body}`.slice(0, 8000)
+
+  // Common patterns in bounce messages:
+  // "Original-Recipient: rfc822;user@example.com"
+  // "Final-Recipient: rfc822;user@example.com"
+  // "failed to deliver to user@example.com"
+  // "delivery to user@example.com failed"
+  // "user@example.com: mailbox full"
+  // "Could not deliver message to <user@example.com>"
+  // "Recipient: <user@example.com>"
+  const patterns = [
+    /Original-Recipient:\s*(?:rfc822;)?\s*([^\s<>]+@[^\s<>]+)/i,
+    /Final-Recipient:\s*(?:rfc822;)?\s*([^\s<>]+@[^\s<>]+)/i,
+    /deliver(?:ed|y)?\s+(?:to|message to)\s*[<?\s"']*([^\s<>@"']+@[^\s<>"'\s)]+)/i,
+    /delivery\s+to\s+([^\s<>@"']+@[^\s<>"'\s)]+)\s+(?:failed|was|has)/i,
+    /could not (?:deliver|send).*?\b([^\s<>@"']+@[^\s<>"'\s)]+)\b/i,
+    /failed\s+(?:to|delivery).*?\b([^\s<>@"']+@[^\s<>"'\s)]+)\b/i,
+    /recipient(?:\s+address)?:\s*[<?\s]*([^\s<>@"']+@[^\s<>"'\s)]+)/i,
+    /\b([^\s<>@"']+@[^\s<>"'\s)]+)\b\s*[:\-]\s*(?:mailbox|user|address|delivery|recipient|does|not|reject|failed)/i,
+    /\bto:\s*([^\s<>@"']+@[^\s<>"'\s)]+)/i,
+  ]
+
+  for (const p of patterns) {
+    const m = text.match(p)
+    if (m && m[1]) {
+      const email = m[1].toLowerCase().trim().replace(/[>;.,)]+$/, '')
+      // Sanity check — must look like an email
+      if (/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(email)) {
+        return email
+      }
+    }
+  }
+
+  // Fallback: find the first email address in the body that's NOT a postmaster/mailer-daemon
+  const allEmails = text.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi) || []
+  for (const e of allEmails) {
+    const lower = e.toLowerCase()
+    if (
+      !lower.startsWith('postmaster@') &&
+      !lower.startsWith('mailer-daemon@') &&
+      !lower.startsWith('mail-daemon@') &&
+      !lower.includes('hostinger.com') &&
+      !lower.includes('noreply') &&
+      !lower.includes('no-reply')
+    ) {
+      return lower
+    }
+  }
+
+  return null
+}
 
 const OOO_PATTERNS = [
   /\bout of (the )?office\b/i,
@@ -87,21 +150,56 @@ export async function processInboundReplies(): Promise<{
         )
         if (isFromPeer) continue
 
-        // Match to a lead by recipient (account) + sender email
-        const lead = await db.lead.findFirst({
-          where: { email: { equals: msg.from, mode: 'insensitive' } },
-          include: { campaign: true },
-        })
-
         const replyType = detectReplyType(msg.subject, msg.text)
 
-        if (!lead) {
-          // Unmatched inbound (bounce notification, system message, etc.)
-          // Log it but don't create a Reply record (no lead to link to)
+        // ─── BOUNCE-SPECIFIC LEAD LOOKUP ───
+        // Bounce emails come FROM postmaster@hostinger.com (or similar) — NOT from
+        // the lead. So matching msg.from to a lead.email fails, and previously
+        // bounces were silently dropped (lead status never updated, SuppressionList
+        // never updated). Fix: extract the original recipient from the bounce body
+        // and look up the lead by THAT email.
+        let lead: any = null
+        let bouncedRecipientEmail: string | null = null
+
+        if (replyType === 'bounce') {
+          bouncedRecipientEmail = extractBouncedRecipient(msg.subject || '', msg.text || '')
+          if (bouncedRecipientEmail) {
+            lead = await db.lead.findFirst({
+              where: { email: { equals: bouncedRecipientEmail, mode: 'insensitive' } },
+              include: { campaign: true },
+            })
+          }
+        } else {
+          // Normal reply / unsubscribe / OOO — match by msg.from (the replier's email)
+          lead = await db.lead.findFirst({
+            where: { email: { equals: msg.from, mode: 'insensitive' } },
+            include: { campaign: true },
+          })
+        }
+
+        // ─── HANDLE UNMATCHED BOUNCE: log + suppress by recipient email ───
+        if (replyType === 'bounce' && !lead) {
+          // Even if we couldn't match a lead, we should still:
+          // 1. Add the bounced recipient to SuppressionList so future sends are blocked
+          // 2. Log the bounce as an EmailLog (for visibility / debugging)
+          if (bouncedRecipientEmail) {
+            await db.suppressionList.upsert({
+              where: { email_reason: { email: bouncedRecipientEmail, reason: 'bounce' } },
+              create: {
+                email: bouncedRecipientEmail,
+                reason: 'bounce',
+                source: `unmatched-bounce (${account.emailAddress})`,
+              },
+              update: {},
+            }).catch(() => null)
+            suppressed++
+          }
           await db.emailLog.create({
             data: {
               direction: 'inbound',
               smtpAccountId: account.id,
+              leadId: null,
+              campaignId: null,
               toEmail: account.emailAddress,
               fromEmail: msg.from,
               subject: msg.subject,
@@ -113,10 +211,38 @@ export async function processInboundReplies(): Promise<{
             },
           }).catch(() => null)
           await markMessageRead(account, msg.folder, msg.uid)
+          await pushNotification({
+            type: 'bounce',
+            severity: 'warning',
+            title: 'Email bounced (unmatched)',
+            message: `${bouncedRecipientEmail || 'Unknown recipient'} — ${msg.subject?.slice(0, 50) || 'delivery failed'}${bouncedRecipientEmail ? '. Added to suppression list.' : ''}`,
+          }).catch(() => {})
           continue
         }
 
-        // Create Reply record (lead found — safe to create)
+        // For non-bounce unmatched messages, log them and skip (no lead to act on)
+        if (!lead) {
+          await db.emailLog.create({
+            data: {
+              direction: 'inbound',
+              smtpAccountId: account.id,
+              leadId: null,
+              campaignId: null,
+              toEmail: account.emailAddress,
+              fromEmail: msg.from,
+              subject: msg.subject,
+              body: msg.text,
+              messageId: msg.messageId,
+              inReplyTo: msg.inReplyTo,
+              isReply: true,
+              receivedAt: msg.date,
+            },
+          }).catch(() => null)
+          await markMessageRead(account, msg.folder, msg.uid)
+          continue // unmatched inbound — logged but no sequence to break
+        }
+
+        // Create Reply record (now that we know we have a real lead)
         await db.reply.create({
           data: {
             leadId: lead.id,
@@ -134,10 +260,10 @@ export async function processInboundReplies(): Promise<{
         newReplies++
 
         // Push notification for new reply
-        const sentimentLabel = sentiment ? ` · ${sentiment}` : ''
+        const sentimentLabel = replyType !== 'normal' ? ` · ${replyType}` : ''
         await pushNotification({
           type: 'reply',
-          severity: sentiment === 'interested' ? 'success' : sentiment === 'unsubscribe' ? 'warning' : 'info',
+          severity: replyType === 'unsubscribe' ? 'warning' : replyType === 'bounce' ? 'warning' : 'info',
           title: `New reply${sentimentLabel}`,
           message: `${msg.from} replied: "${msg.subject?.slice(0, 60) || '(no subject)'}"`,
         }).catch(() => {})

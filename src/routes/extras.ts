@@ -408,6 +408,118 @@ app.delete('/suppression/:id', async (c) => {
   return c.json({ ok: true })
 })
 
+// POST /api/extras/suppression/sync — backfill SuppressionList from Lead table.
+// Scans all leads with status in [bounced, suppressed, unsubscribed] and adds any
+// missing entries to SuppressionList. Also reports how many were out of sync.
+// This fixes historical drift where leads had a suppressed/bounced status but no
+// matching SuppressionList row (e.g. from old bounce handling that didn't insert).
+app.post('/suppression/sync', async (c) => {
+  const TARGET_STATUSES = ['bounced', 'suppressed', 'unsubscribed'] as const
+  const STATUS_TO_REASON: Record<string, 'bounce' | 'manual' | 'unsubscribe'> = {
+    bounced: 'bounce',
+    suppressed: 'manual',
+    unsubscribed: 'unsubscribe',
+  }
+
+  const leads = await db.lead.findMany({
+    where: { status: { in: [...TARGET_STATUSES] } },
+    select: { id: true, email: true, status: true, campaign: { select: { name: true } } },
+  })
+
+  // Get current set of (email, reason) pairs already in SuppressionList for these emails
+  const emails = leads.map((l) => l.email.toLowerCase()).filter(Boolean)
+  const existing = await db.suppressionList.findMany({
+    where: { email: { in: emails } },
+    select: { email: true, reason: true },
+  })
+  const existingSet = new Set(existing.map((e) => `${e.email}|${e.reason}`))
+
+  let added = 0
+  let skipped = 0
+  const toCreate: { email: string; reason: string; source: string | null }[] = []
+
+  for (const lead of leads) {
+    if (!lead.email) continue
+    const email = lead.email.toLowerCase()
+    const reason = STATUS_TO_REASON[lead.status]
+    if (!reason) continue
+    const key = `${email}|${reason}`
+    if (existingSet.has(key)) {
+      skipped++
+      continue
+    }
+    toCreate.push({
+      email,
+      reason,
+      source: lead.campaign?.name || `sync-from-status:${lead.status}`,
+    })
+  }
+
+  if (toCreate.length > 0) {
+    // Use individual upserts — `skipDuplicates` isn't supported on this Prisma
+    // version, and we already filtered existing rows above. upsert handles any
+    // race conditions gracefully.
+    for (const entry of toCreate) {
+      await db.suppressionList.upsert({
+        where: { email_reason: { email: entry.email, reason: entry.reason } },
+        create: entry,
+        update: {},
+      }).catch(() => null)
+    }
+    added = toCreate.length
+  }
+
+  // Also report how many leads are out of sync (for the warning banner)
+  const totalLeadsWithStatus = leads.length
+  const totalSuppressionEntries = await db.suppressionList.count()
+
+  return c.json({
+    ok: true,
+    scanned: leads.length,
+    added,
+    skipped,
+    outOfSync: totalLeadsWithStatus - skipped,
+    totalSuppressionEntries,
+  })
+})
+
+// GET /api/extras/suppression/sync-status — quick check of how many leads are
+// out of sync with SuppressionList (for the warning banner on the frontend).
+app.get('/suppression/sync-status', async (c) => {
+  const leads = await db.lead.findMany({
+    where: { status: { in: ['bounced', 'suppressed', 'unsubscribed'] } },
+    select: { email: true, status: true },
+  })
+  const emails = leads.map((l) => l.email.toLowerCase()).filter(Boolean)
+  const existing = await db.suppressionList.findMany({
+    where: { email: { in: emails } },
+    select: { email: true, reason: true },
+  })
+  const existingSet = new Set(existing.map((e) => `${e.email}|${e.reason}`))
+
+  const STATUS_TO_REASON: Record<string, string> = {
+    bounced: 'bounce',
+    suppressed: 'manual',
+    unsubscribed: 'unsubscribe',
+  }
+
+  let outOfSync = 0
+  for (const lead of leads) {
+    if (!lead.email) continue
+    const reason = STATUS_TO_REASON[lead.status]
+    if (!reason) continue
+    if (!existingSet.has(`${lead.email.toLowerCase()}|${reason}`)) {
+      outOfSync++
+    }
+  }
+
+  return c.json({
+    totalLeadsWithStatus: leads.length,
+    outOfSync,
+    needsSync: outOfSync > 0,
+  })
+})
+
 app.post('/suppression', async (c) => {
   const body = await c.req.json()
   const { email, reason, source } = body
