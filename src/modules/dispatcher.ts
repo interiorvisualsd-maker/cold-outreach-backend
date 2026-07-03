@@ -276,14 +276,17 @@ export async function scheduleNextStep(leadId: string, campaignId: string, curre
   if (!lead) return
 
   const scheduledAt = new Date(now.getTime() + nextStep.delayDays * 24 * 60 * 60 * 1000)
-  // For followups, prefer the lead's pre-generated CSV message. Otherwise,
-  // pick a random variant from the step's `|||`-separated subject/body fields.
-  const subject = nextStep.stepNumber === 2 && lead.followupDay3
-    ? lead.followupDay3.split('\n')[0] // first line as subject fallback
+  // For followups, prefer the lead's pre-generated CSV body.
+  // Subject: use "Re: " + the original outreach subject (natural email threading)
+  // If no custom subject exists, fall back to the step editor's subject.
+  const csvBody = nextStep.stepNumber === 2 ? lead.followupDay3
+    : nextStep.stepNumber === 3 ? lead.followupDay7
+    : null
+  
+  const subject = csvBody
+    ? `Re: ${lead.outreachSubject || pickVariant(nextStep.subject)}`
     : pickVariant(nextStep.subject)
-  const body = nextStep.stepNumber === 2 ? (lead.followupDay3 || pickVariant(nextStep.body))
-    : nextStep.stepNumber === 3 ? (lead.followupDay7 || pickVariant(nextStep.body))
-    : pickVariant(nextStep.body)
+  const body = csvBody || pickVariant(nextStep.body)
 
   await db.scheduledEmail.create({
     data: {
