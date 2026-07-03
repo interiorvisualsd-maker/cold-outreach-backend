@@ -195,7 +195,8 @@ export async function processInboundReplies(): Promise<{
         }
 
         // ─── BOUNCE → SUPPRESS + MARK EMAIL INVALID ───
-        if (replyType === 'bounce') {
+        // Only suppress if not already suppressed/bounced (prevents re-processing)
+        if (replyType === 'bounce' && lead.status !== 'bounced' && lead.status !== 'suppressed') {
           await db.suppressionList.upsert({
             where: { email_reason: { email: lead.email.toLowerCase(), reason: 'bounce' } },
             create: { email: lead.email.toLowerCase(), reason: 'bounce', source: lead.campaign?.name },
