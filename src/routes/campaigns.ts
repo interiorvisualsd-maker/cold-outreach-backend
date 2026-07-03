@@ -164,15 +164,20 @@ app.get('/:id/leads', async (c) => {
   const page = parseInt(c.req.query('page') || '1')
   const limit = Math.min(parseInt(c.req.query('limit') || '50'), 200)
   const status = c.req.query('status')
+  const page = Math.max(1, parseInt(c.req.query('page') || '1'))
+  const limit = Math.min(parseInt(c.req.query('limit') || '50'), 200)
 
   const where: any = { campaignId }
-  if (status) where.status = status
+  // Only filter by status if it's a valid status value (not 'undefined', 'all', or empty)
+  if (status && status !== 'all' && status !== 'undefined' && status !== '') {
+    where.status = status
+  }
 
   const [leads, total] = await Promise.all([
     db.lead.findMany({
       where,
       orderBy: { createdAt: 'desc' },
-      skip: (page - 1) * limit,
+      skip: Math.max(0, (page - 1) * limit),
       take: limit,
     }),
     db.lead.count({ where }),
