@@ -1243,12 +1243,74 @@ app.post('/validate-single', async (c) => {
 })
 
 // POST /api/extras/campaigns/:id/validate-leads — validate all leads in a campaign
+// POST /api/extras/campaigns/:id/validate-leads — async, returns immediately
 app.post('/campaigns/:id/validate-leads', async (c) => {
   const campaignId = c.req.param('id')
   const leads = await db.lead.findMany({
     where: { campaignId, status: { in: ['pending', 'step1_sent', 'step2_sent', 'step3_sent'] } },
     select: { id: true, email: true },
   })
+
+  if (leads.length === 0) {
+    return c.json({ ok: true, message: 'No leads to validate', validated: 0, valid: 0, suppressed: 0 })
+  }
+
+  const totalLeads = leads.length
+  console.log(`[validate] Starting async validation of ${totalLeads} leads`)
+
+  // Fire and forget — process in background
+  ;(async () => {
+    let validCount = 0
+    let suppressedCount = 0
+
+    for (let i = 0; i < leads.length; i += 5) {
+      const batch = leads.slice(i, i + 5)
+      const results = await validateEmailBatch(batch.map(l => l.email), 5)
+
+      for (let j = 0; j < batch.length; j++) {
+        const lead = batch[j]
+        const result = results[j]
+
+        if (!result.valid) {
+          await db.suppressionList.upsert({
+            where: { email_reason: { email: lead.email.toLowerCase(), reason: 'bounce' } },
+            create: { email: lead.email.toLowerCase(), reason: 'bounce', source: `Pre-send validation: ${result.reason}` },
+            update: {},
+          }).catch(() => {})
+          await db.lead.update({ where: { id: lead.id }, data: { status: 'suppressed' } }).catch(() => {})
+          await db.scheduledEmail.updateMany({ where: { leadId: lead.id, status: 'queued' }, data: { status: 'cancelled' } }).catch(() => {})
+          suppressedCount++
+        } else {
+          validCount++
+        }
+      }
+
+      if ((i + 5) % 50 === 0) {
+        console.log(`[validate] Progress: ${i + 5}/${totalLeads} (${validCount} valid, ${suppressedCount} suppressed)`)
+      }
+    }
+
+    console.log(`[validate] Complete: ${validCount} valid, ${suppressedCount} suppressed`)
+
+    const { pushNotification } = await import('../lib/notifications').catch(() => ({ pushNotification: null }))
+    if (pushNotification) {
+      await pushNotification({
+        type: 'system',
+        severity: 'success',
+        title: 'Email validation complete',
+        message: `${validCount} valid, ${suppressedCount} bad emails removed out of ${totalLeads} total.`,
+      }).catch(() => {})
+    }
+  })().catch(e => console.error('[validate] error:', e?.message))
+
+  return c.json({
+    ok: true,
+    started: true,
+    message: `Validation started for ${totalLeads} leads. Check notifications for results.`,
+    validated: totalLeads,
+  })
+})
+
 
   if (leads.length === 0) {
     return c.json({ ok: true, message: 'No leads to validate', validated: 0 })
