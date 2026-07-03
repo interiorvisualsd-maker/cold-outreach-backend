@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { db } from '../lib/db'
+import { pickVariant } from '../lib/variants'
 
 const app = new Hono()
 
@@ -108,8 +109,10 @@ app.post('/:id/start', async (c) => {
   // Schedule step 1 within sending window, staggered over next 24h
   const scheduled: any[] = []
   for (const lead of leads) {
-    const subject = lead.outreachSubject || step1.subject
-    const body = lead.initialOutreach || step1.body
+    // Use lead's custom CSV message if present, otherwise pick a random
+    // variant from the step's `|||`-separated subject/body fields.
+    const subject = lead.outreachSubject || pickVariant(step1.subject)
+    const body = lead.initialOutreach || pickVariant(step1.body)
     // Stagger: spread leads across the next few sending windows
     const offset = Math.floor(Math.random() * 60 * 60 * 1000) // random within 1h
     const scheduledAt = new Date(now.getTime() + offset)

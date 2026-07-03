@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { db } from '../lib/db'
+import { pickVariant } from '../lib/variants'
 
 const app = new Hono()
 
@@ -192,8 +193,8 @@ app.post('/leads/bulk', async (c) => {
           campaignId: lead.campaignId,
           leadId: lead.id,
           stepNumber: 1,
-          subject: lead.outreachSubject || step1.subject,
-          body: lead.initialOutreach || step1.body,
+          subject: lead.outreachSubject || pickVariant(step1.subject),
+          body: lead.initialOutreach || pickVariant(step1.body),
           scheduledAt: new Date(Date.now() + Math.random() * 60 * 60 * 1000),
         },
       })

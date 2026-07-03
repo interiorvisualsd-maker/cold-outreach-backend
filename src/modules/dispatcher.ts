@@ -4,6 +4,7 @@ import { sendMail } from '../lib/smtp'
 import { clearTransportCache } from '../lib/smtp'
 import { pushNotification } from '../lib/notifications'
 import type { SmtpAccount } from '@prisma/client'
+import { pickVariant } from '../lib/variants'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INBOX ROTATION + THROTTLING ENGINE
@@ -18,6 +19,13 @@ export async function pickAccountForSend(now: Date = new Date()): Promise<SmtpAc
   })
 
   for (const account of accounts) {
+    // Skip accounts that are still warming up (unless warmup is disabled).
+    // Only accounts with warmupState === 'warm' (or warmupEnabled === false)
+    // are eligible for campaign sending — protects sender reputation by
+    // ensuring cold/heating inboxes aren't used for bulk outreach.
+    if (account.warmupEnabled && account.warmupState !== 'warm') {
+      continue // Skip this account — still warming up
+    }
     // Daily cap check
     if (account.sentToday >= account.dailyCap) continue
     // Hourly cap check — count sends in the last hour
@@ -268,20 +276,21 @@ export async function scheduleNextStep(leadId: string, campaignId: string, curre
   if (!lead) return
 
   const scheduledAt = new Date(now.getTime() + nextStep.delayDays * 24 * 60 * 60 * 1000)
+  // For followups, prefer the lead's pre-generated CSV message. Otherwise,
+  // pick a random variant from the step's `|||`-separated subject/body fields.
   const subject = nextStep.stepNumber === 2 && lead.followupDay3
     ? lead.followupDay3.split('\n')[0] // first line as subject fallback
-    : nextStep.subject
-  const body = nextStep.stepNumber === 2 ? (lead.followupDay3 || nextStep.body)
-    : nextStep.stepNumber === 3 ? (lead.followupDay7 || nextStep.body)
-    : nextStep.body
+    : pickVariant(nextStep.subject)
+  const body = nextStep.stepNumber === 2 ? (lead.followupDay3 || pickVariant(nextStep.body))
+    : nextStep.stepNumber === 3 ? (lead.followupDay7 || pickVariant(nextStep.body))
+    : pickVariant(nextStep.body)
 
-  // For followups, prefer the pre-generated body. Subject is shared.
   await db.scheduledEmail.create({
     data: {
       campaignId,
       leadId,
       stepNumber: nextStep.stepNumber,
-      subject: nextStep.subject,
+      subject,
       body,
       scheduledAt,
     },
