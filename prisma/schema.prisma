@@ -131,6 +131,7 @@ model Lead {
   repliedAt       DateTime?
   bouncedAt       DateTime?
   unsubscribedAt  DateTime?
+  verifiedAt      DateTime? // set when email verification confirmed the address is valid
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 

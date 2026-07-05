@@ -218,6 +218,39 @@ export async function processSendBatch(batchSize = 3): Promise<{
       continue
     }
 
+    // ─── DEFENSIVE SUPPRESSION-LIST CHECK ───
+    // Lead.status is the primary source of truth, but SuppressionList can
+    // drift ahead of it (e.g. a bounce notification arrived but the lead
+    // row hasn't been updated yet, or a manual suppression was added).
+    // This belt-and-suspenders check guarantees we NEVER send to a
+    // suppressed email, even if Lead.status is stale.
+    const suppressedEntry = await db.suppressionList.findFirst({
+      where: {
+        email: { equals: item.lead.email.toLowerCase(), mode: 'insensitive' },
+      },
+      select: { id: true, reason: true },
+    })
+    if (suppressedEntry) {
+      // Repair the drift: sync Lead.status to match the suppression entry
+      const statusMap: Record<string, string> = {
+        bounce: 'bounced',
+        unsubscribe: 'unsubscribed',
+        complaint: 'suppressed',
+        manual: 'suppressed',
+      }
+      const newStatus = statusMap[suppressedEntry.reason] || 'suppressed'
+      await db.lead.update({
+        where: { id: item.leadId },
+        data: { status: newStatus as any },
+      }).catch(() => {})
+      await db.scheduledEmail.update({
+        where: { id: item.id },
+        data: { status: 'cancelled' },
+      })
+      skipped++
+      continue
+    }
+
     // Pick the next account from our random subset (round-robin within the
     // subset, but the subset itself is randomly chosen each tick)
     const account = accountsThisTick[accountIndex % accountsThisTick.length]
