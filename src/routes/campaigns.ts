@@ -161,11 +161,9 @@ app.post('/:id/pause', async (c) => {
 // GET /api/campaigns/:id/leads — paginated leads
 app.get('/:id/leads', async (c) => {
   const campaignId = c.req.param('id')
-  const page = parseInt(c.req.query('page') || '1')
-  const limit = Math.min(parseInt(c.req.query('limit') || '50'), 200)
-  const status = c.req.query('status')
   const page = Math.max(1, parseInt(c.req.query('page') || '1'))
   const limit = Math.min(parseInt(c.req.query('limit') || '50'), 200)
+  const status = c.req.query('status')
 
   const where: any = { campaignId }
   // Only filter by status if it's a valid status value (not 'undefined', 'all', or empty)
