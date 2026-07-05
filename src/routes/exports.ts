@@ -374,6 +374,10 @@ app.post('/leads/verify', async (c) => {
     message: `${valid} valid · ${invalid} invalid · ${warningsCount} warnings · ${errors} errors · ${suppressed} suppressed. Invalid: ${Object.entries(invalidReasons).map(([k, v]) => `${k}: ${v}`).join(', ') || 'none'}. Warnings: ${Object.entries(warningReasons).map(([k, v]) => `${k}: ${v}`).join(', ') || 'none'}`,
   }).catch(() => {})
 
+  const invSummary = Object.entries(invalidReasons).map(([k, v]) => `${k}:${v}`).join(' ') || 'none'
+  const warnSummary = Object.entries(warningReasons).map(([k, v]) => `${k}:${v}`).join(' ') || 'none'
+  console.log(`[verify] ${mode.toUpperCase()} campaign=${campaignId} → 200 · scanned=${leads.length} valid=${valid} invalid=${invalid} warnings=${warningsCount} errors=${errors} suppressed=${suppressed} | invalid[${invSummary}] warnings[${warnSummary}]`)
+
   return c.json({
     ok: true,
     mode,

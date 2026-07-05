@@ -87,7 +87,10 @@ app.post('/:id/steps', async (c) => {
   return c.json({ step })
 })
 
-// POST /api/campaigns/:id/start — queue all pending leads for step 1
+// POST /api/campaigns/:id/start — queue all pending leads for step 1.
+// Also serves as "resume" for paused campaigns: it only queues leads still
+// at status 'pending' (leads already at step1_sent/step2_sent are left alone
+// for the dispatcher's follow-up tick to handle).
 app.post('/:id/start', async (c) => {
   const campaignId = c.req.param('id')
   const campaign = await db.campaign.findUnique({
@@ -95,7 +98,7 @@ app.post('/:id/start', async (c) => {
     include: { steps: true },
   })
   if (!campaign) return c.json({ error: 'Campaign not found' }, 404)
-  if (campaign.steps.length === 0) return c.json({ error: 'No steps defined' }, 400)
+  if (campaign.steps.length === 0) return c.json({ error: 'No steps defined — add at least one sequence step before starting.' }, 400)
 
   const step1 = campaign.steps.find((s) => s.stepNumber === 1)
   if (!step1) return c.json({ error: 'Step 1 not defined' }, 400)
@@ -104,6 +107,19 @@ app.post('/:id/start', async (c) => {
   const leads = await db.lead.findMany({
     where: { campaignId, status: 'pending' },
   })
+
+  // Guard: block start if there are no leads at all in the campaign.
+  // This prevents the user from starting an empty campaign and then
+  // wondering why nothing sends.
+  const totalLeadsInCampaign = await db.lead.count({ where: { campaignId } })
+  if (totalLeadsInCampaign === 0) {
+    return c.json({
+      error: 'This campaign has no leads yet. Import a CSV lead list before starting.',
+    }, 400)
+  }
+
+  // Distinguish "start" (from draft) vs "resume" (from paused) for logging
+  const isResume = campaign.status === 'paused'
 
   const now = new Date()
   // Schedule step 1 within sending window, staggered over next 24h
@@ -140,6 +156,8 @@ app.post('/:id/start', async (c) => {
     where: { campaignId, status: 'pending' },
     data: { status: 'pending' }, // stays pending until step 1 actually sends
   })
+
+  console.log(`[campaign] ${isResume ? 'RESUME' : 'START'} ${campaignId} → 200 · queued ${scheduled.length} step-1 emails · ${totalLeadsInCampaign} total leads`)
 
   return c.json({ queued: scheduled.length, campaign: { ...campaign, status: 'active' } })
 })
