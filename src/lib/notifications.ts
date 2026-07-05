@@ -11,38 +11,49 @@
 
 import { db } from './db'
 import http from 'node:http'
+import https from 'node:https'
 
 // ─── Realtime pub/sub publisher ───
-// The backend publishes notifications via a simple HTTP POST to the realtime
-// service's publisher endpoint (port 3004). The realtime service then
-// broadcasts to all connected frontend subscribers via socket.io (port 3003).
+// The backend publishes notifications via a simple HTTP/HTTPS POST to the
+// realtime service's /emit endpoint. The realtime service then broadcasts to
+// all connected frontend subscribers via socket.io.
 //
-// We use Node's native http module (not fetch) because Next.js patches fetch
-// with caching/interception that can prevent real HTTP requests to localhost.
-const REALTIME_PUBLISHER_HOST = process.env.REALTIME_PUBLISHER_HOST || 'localhost'
-const REALTIME_PUBLISHER_PORT = parseInt(process.env.REALTIME_PUBLISHER_PORT || '3004', 10)
+// In sandbox: REALTIME_PUBLISHER_URL defaults to http://localhost:3003
+// In production: set REALTIME_PUBLISHER_URL to the realtime service's public URL
+//   e.g. https://cold-outreach-realtime.onrender.com
+//
+// We use Node's native http/https module (not fetch) because Next.js patches
+// fetch with caching/interception that can prevent real HTTP requests.
+const REALTIME_PUBLISHER_URL = process.env.REALTIME_PUBLISHER_URL || 'http://localhost:3003'
+
+// Parse the URL once at startup
+let parsedUrl: URL
+try {
+  parsedUrl = new URL(REALTIME_PUBLISHER_URL)
+} catch {
+  parsedUrl = new URL('http://localhost:3003')
+}
+const isHttps = parsedUrl.protocol === 'https:'
 
 // Emit a notification to the realtime pub/sub service (fire-and-forget).
 // If the realtime service is down, this is a no-op (DB persistence still works).
 function emitToRealtime(notif: Notification) {
   try {
     const body = JSON.stringify(notif)
-    const req = http.request(
-      {
-        hostname: REALTIME_PUBLISHER_HOST,
-        port: REALTIME_PUBLISHER_PORT,
-        path: '/emit',
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(body),
-        },
-        timeout: 3000,
+    const options = {
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (isHttps ? 443 : 80),
+      path: '/emit',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
       },
-      (res) => {
-        res.resume()
-      },
-    )
+      timeout: 3000,
+    }
+    const req = (isHttps ? https : http).request(options, (res) => {
+      res.resume()
+    })
     req.on('error', () => {
       // Silent — realtime service may be down. DB persistence still works.
     })
