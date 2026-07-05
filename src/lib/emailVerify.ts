@@ -276,11 +276,20 @@ async function trySmtpRcpt(
 
 // ─── Combined quick check (layers 1-4) ───
 // Safe to run on every email at import time. Returns a verdict + reason.
+//
+// IMPORTANT: role-based addresses (info@, sales@, contact@) are NOT marked
+// as invalid. They're common for B2B outreach and the user may intentionally
+// want to email them. They're flagged as a "warning" in the `warnings` array
+// but `valid` stays true. Only these reasons cause `valid: false`:
+//   - invalid format (bad regex, too long, bad characters)
+//   - disposable/temp domain
+//   - no MX records (domain can't receive mail)
 export interface QuickVerifyResult {
   email: string
   valid: boolean
   reason?: string
   layer?: 'format' | 'disposable' | 'role' | 'mx' | 'ok'
+  warnings: string[] // non-fatal issues (e.g. role-based)
   mxHosts?: string[]
 }
 
@@ -288,32 +297,40 @@ export async function quickVerify(email: string): Promise<QuickVerifyResult> {
   const e = (email || '').trim().toLowerCase()
   const formatCheck = checkFormat(e)
   if (!formatCheck.valid) {
-    return { email: e, valid: false, reason: formatCheck.reason, layer: 'format' }
+    return { email: e, valid: false, reason: formatCheck.reason, layer: 'format', warnings: [] }
   }
 
   const [local, domain] = e.split('@')
 
   if (isDisposable(domain)) {
-    return { email: e, valid: false, reason: 'disposable_domain', layer: 'disposable' }
+    return { email: e, valid: false, reason: 'disposable_domain', layer: 'disposable', warnings: [] }
   }
 
+  const warnings: string[] = []
+
+  // Role-based is a WARNING, not a failure — user may want to email info@company.com
   if (isRoleBased(local)) {
-    // Role-based isn't strictly invalid, but it's a soft warning — mark as
-    // invalid for cold outreach since these addresses rarely reach a decision-maker
-    return { email: e, valid: false, reason: 'role_based', layer: 'role' }
+    warnings.push('role_based')
   }
 
   const mxCheck = await checkMx(domain)
   if (!mxCheck.valid) {
-    return { email: e, valid: false, reason: 'no_mx_records', layer: 'mx' }
+    return { email: e, valid: false, reason: 'no_mx_records', layer: 'mx', warnings }
   }
 
-  return { email: e, valid: true, layer: 'ok', mxHosts: mxCheck.hosts }
+  return { email: e, valid: true, layer: 'ok', warnings, mxHosts: mxCheck.hosts }
 }
 
 // ─── Deep check (all 5 layers) ───
 // Runs quickVerify first, then SMTP mailbox verification if the quick check
 // passes. Slow (~1-5s per email) — only run on-demand.
+//
+// Only these cause `valid: false` (suppression):
+//   - quick check failures (format, disposable, no MX)
+//   - SMTP 550 response (mailbox definitively does not exist)
+//
+// SMTP "unknown" (timeout, greylisting, catch-all) does NOT suppress —
+// we only suppress on CONFIRMED invalid.
 export interface DeepVerifyResult extends QuickVerifyResult {
   smtpStatus?: 'valid' | 'invalid' | 'unknown' | 'catch-all'
   smtpDetails?: string
@@ -331,12 +348,23 @@ export async function deepVerify(
     quick.mxHosts || [],
     fromDomain,
   )
+
+  // Only suppress on CONFIRMED invalid (SMTP 550). Unknown/catch-all/valid
+  // all pass through — we don't want to suppress emails we're not sure about.
+  if (smtpResult.status === 'invalid') {
+    return {
+      ...quick,
+      smtpStatus: smtpResult.status,
+      smtpDetails: smtpResult.details,
+      valid: false,
+      reason: 'mailbox_does_not_exist',
+    }
+  }
+
   return {
     ...quick,
     smtpStatus: smtpResult.status,
     smtpDetails: smtpResult.details,
-    // If SMTP says invalid, override the quick 'valid' verdict
-    valid: smtpResult.status === 'invalid' ? false : quick.valid,
-    reason: smtpResult.status === 'invalid' ? 'mailbox_does_not_exist' : quick.reason,
+    // valid stays as quick.valid (true) for valid/unknown/catch-all
   }
 }

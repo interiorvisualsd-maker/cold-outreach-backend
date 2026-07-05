@@ -300,7 +300,9 @@ app.post('/leads/verify', async (c) => {
   let valid = 0
   let invalid = 0
   let errors = 0
+  let warningsCount = 0 // non-fatal warnings (e.g. role-based emails)
   const invalidReasons: Record<string, number> = {}
+  const warningReasons: Record<string, number> = {}
   const suppressedEmails: { email: string; reason: string; details?: string }[] = []
 
   for (const lead of leads) {
@@ -311,6 +313,13 @@ app.post('/leads/verify', async (c) => {
 
       if (result.valid) {
         valid++
+        // Track non-fatal warnings (e.g. role-based) for reporting
+        if (result.warnings && result.warnings.length > 0) {
+          warningsCount++
+          for (const w of result.warnings) {
+            warningReasons[w] = (warningReasons[w] || 0) + 1
+          }
+        }
       } else {
         invalid++
         const reasonKey = result.reason || 'unknown'
@@ -362,7 +371,7 @@ app.post('/leads/verify', async (c) => {
     type: 'system',
     severity: invalid > 0 ? 'warning' : 'success',
     title: `Email verification complete (${mode})`,
-    message: `${valid} valid · ${invalid} invalid · ${errors} errors · ${suppressed} suppressed. ${Object.entries(invalidReasons).map(([k, v]) => `${k}: ${v}`).join(', ') || 'No issues found.'}`,
+    message: `${valid} valid · ${invalid} invalid · ${warningsCount} warnings · ${errors} errors · ${suppressed} suppressed. Invalid: ${Object.entries(invalidReasons).map(([k, v]) => `${k}: ${v}`).join(', ') || 'none'}. Warnings: ${Object.entries(warningReasons).map(([k, v]) => `${k}: ${v}`).join(', ') || 'none'}`,
   }).catch(() => {})
 
   return c.json({
@@ -371,6 +380,8 @@ app.post('/leads/verify', async (c) => {
     scanned: leads.length,
     valid,
     invalid,
+    warnings: warningsCount,
+    warningReasons,
     errors,
     suppressed,
     invalidReasons,

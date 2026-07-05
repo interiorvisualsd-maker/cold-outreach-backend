@@ -3,9 +3,58 @@
 //
 // Notifications are stored in the Setting table as JSON (key: 'notifications').
 // Webhooks (Slack/Discord) are stored as JSON (key: 'webhooks').
-// The helper is safe to call from any module — it never throws.
+//
+// PUB/SUB: In addition to persisting to the DB, pushNotification() also emits
+// the notification to a standalone socket.io realtime service (port 3003) which
+// broadcasts to all connected frontend clients. This gives real-time delivery
+// without polling. The helper is safe to call from any module — it never throws.
 
 import { db } from './db'
+import http from 'node:http'
+
+// ─── Realtime pub/sub publisher ───
+// The backend publishes notifications via a simple HTTP POST to the realtime
+// service's publisher endpoint (port 3004). The realtime service then
+// broadcasts to all connected frontend subscribers via socket.io (port 3003).
+//
+// We use Node's native http module (not fetch) because Next.js patches fetch
+// with caching/interception that can prevent real HTTP requests to localhost.
+const REALTIME_PUBLISHER_HOST = process.env.REALTIME_PUBLISHER_HOST || 'localhost'
+const REALTIME_PUBLISHER_PORT = parseInt(process.env.REALTIME_PUBLISHER_PORT || '3004', 10)
+
+// Emit a notification to the realtime pub/sub service (fire-and-forget).
+// If the realtime service is down, this is a no-op (DB persistence still works).
+function emitToRealtime(notif: Notification) {
+  try {
+    const body = JSON.stringify(notif)
+    const req = http.request(
+      {
+        hostname: REALTIME_PUBLISHER_HOST,
+        port: REALTIME_PUBLISHER_PORT,
+        path: '/emit',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        },
+        timeout: 3000,
+      },
+      (res) => {
+        res.resume()
+      },
+    )
+    req.on('error', () => {
+      // Silent — realtime service may be down. DB persistence still works.
+    })
+    req.on('timeout', () => {
+      req.destroy()
+    })
+    req.write(body)
+    req.end()
+  } catch {
+    // Never let pub/sub failure crash the notification system
+  }
+}
 
 interface Notification {
   id: string
@@ -221,6 +270,11 @@ export async function pushNotification(params: {
     }
     notifs.unshift(newNotif)
     await persistNotifications(notifs)
+
+    // ─── PUB/SUB: emit to realtime service for instant delivery ───
+    // This pushes the notification to all connected frontend clients via
+    // socket.io, eliminating the 60s polling delay.
+    emitToRealtime(newNotif)
 
     // Fire and forget — webhooks run in background
     sendWebhooks(newNotif).catch(() => {})

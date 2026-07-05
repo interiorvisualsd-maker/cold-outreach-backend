@@ -242,29 +242,24 @@ export async function processSendBatch(batchSize = 3): Promise<{
     })
 
     try {
-      // ─── PLAIN TEXT EMAIL (no HTML, no tracking pixel, no unsubscribe link) ───
-      // Per user request: emails should look like a normal email sent from a
-      // phone. Plain text only. The ONLY addition is a short natural opt-out
-      // line at the bottom (CAN-SPAM legal minimum) — no links, just text.
+      // ─── PLAIN TEXT EMAIL — RAW BODY ONLY, NOTHING ADDED ───
+      // Per user request: send ONLY the email text exactly as written in the
+      // campaign/CSV. No HTML, no tracking pixel, no unsubscribe link, no
+      // footer, no signature, no opt-out line. The body is sent verbatim.
       //
-      // We do NOT wrap URLs in click-tracking redirects anymore.
+      // We do NOT wrap URLs in click-tracking redirects.
       // We do NOT add an HTML body.
       // We do NOT add a tracking pixel.
+      // We do NOT append any footer or signature.
       //
       // Pick a variant (A/B/C) if the step has multiple — frozen per lead.
       const bodyText = pickVariant(item.body)
       const subjectText = pickVariant(item.subject)
 
-      // Short, natural opt-out footer. No link, no HTML — just plain text
-      // that looks like a human sign-off. This satisfies CAN-SPAM's "clear
-      // and conspicuous" opt-out mechanism requirement.
-      const footer = '\n\n—\nReply STOP if you\'d rather I not reach out.'
-      const textBody = bodyText + footer
-
       const { messageId } = await sendMail(account, {
         to: item.lead.email,
         subject: subjectText,
-        text: textBody,
+        text: bodyText,
         // Explicitly NO html — plain text only, like a phone email
         fromName: item.campaign.fromNameOverride || account.fromName,
       })
@@ -299,7 +294,7 @@ export async function processSendBatch(batchSize = 3): Promise<{
           toEmail: item.lead.email,
           fromEmail: account.emailAddress,
           subject: subjectText,
-          body: textBody,
+          body: bodyText,
           messageId,
           sentAt: now,
         },
