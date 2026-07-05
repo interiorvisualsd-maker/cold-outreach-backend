@@ -33,6 +33,21 @@ app.use('*', cors({
   credentials: true,
 }))
 
+// ─── Request logger ───────────────────────────────────────────────────────
+// Logs mutating requests (POST/PUT/DELETE) so they appear in Render logs.
+// GETs are skipped to avoid noise (health pings every 15 min, polling, etc).
+app.use('*', async (c, next) => {
+  await next()
+  const method = c.req.method
+  if (method === 'GET' || method === 'OPTIONS' || method === 'HEAD') return
+  const path = c.req.path
+  const status = c.res.status
+  const ts = new Date().toISOString()
+  // Skip health-check noise; surface everything else
+  if (path === '/api/health') return
+  console.log(`[${ts}] ${method} ${path} → ${status}`)
+})
+
 // Health check (public)
 app.get('/api/health', (c) => c.json({ ok: true, service: 'lead-dispatcher-backend', ts: Date.now() }))
 

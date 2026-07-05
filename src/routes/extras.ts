@@ -462,12 +462,14 @@ app.delete('/suppression/:id', async (c) => {
   const id = c.req.param('id')
   const entry = await db.suppressionList.findUnique({ where: { id } })
   if (!entry) {
+    console.log(`[suppression] DELETE /${id} → 404 (not found)`)
     return c.json({ error: 'Suppression entry not found (it may have already been deleted).' }, 404)
   }
 
   // Reset matching leads FIRST (while we still have the email/reason), then delete.
   const leadsReset = await resetLeadsForEntries([entry])
   await db.suppressionList.delete({ where: { id } })
+  console.log(`[suppression] DELETE /${id} → 200 · removed ${entry.email} (${entry.reason}) · ${leadsReset} lead(s) reset to active`)
 
   return c.json({ ok: true, leadsReset, email: entry.email })
 })
@@ -484,11 +486,13 @@ app.delete('/suppression', async (c) => {
     select: { email: true, reason: true },
   })
   if (entries.length === 0) {
+    console.log(`[suppression] BULK DELETE${reason ? ` (reason=${reason})` : ''} → 200 · nothing to delete`)
     return c.json({ ok: true, deleted: 0, leadsReset: 0 })
   }
 
   const leadsReset = await resetLeadsForEntries(entries)
   await db.suppressionList.deleteMany({ where })
+  console.log(`[suppression] BULK DELETE${reason ? ` (reason=${reason})` : ''} → 200 · removed ${entries.length} entries · ${leadsReset} lead(s) reset to active`)
 
   return c.json({ ok: true, deleted: entries.length, leadsReset })
 })
