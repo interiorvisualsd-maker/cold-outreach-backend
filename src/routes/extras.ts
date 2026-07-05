@@ -404,9 +404,93 @@ app.get('/suppression', async (c) => {
   return c.json({ items, total, page, limit, pages: Math.ceil(total / limit), byReason })
 })
 
+// ─── Lead-status reset helper ──────────────────────────────────────────────
+// When a suppression entry is deleted, the matching Lead(s) must ALSO have
+// their status reset (bounced/suppressed/unsubscribed → active), otherwise
+// the next "Sync from Leads" run would immediately re-add them. This is the
+// root cause of the "delete doesn't persist" bug — SuppressionList is a
+// denormalized copy of Lead.status; deleting one without the other creates a
+// contradiction that sync "fixes" by re-adding the entry.
+const LEAD_STATUS_BY_REASON: Record<string, string> = {
+  bounce: 'bounced',
+  unsubscribe: 'unsubscribed',
+  manual: 'suppressed',
+  complaint: 'suppressed',
+}
+
+async function resetLeadsForEntries(
+  entries: { email: string; reason: string }[],
+): Promise<number> {
+  if (entries.length === 0) return 0
+
+  // Group emails by the lead status they should reset
+  const byStatus: Record<string, Set<string>> = {}
+  for (const entry of entries) {
+    const leadStatus = LEAD_STATUS_BY_REASON[entry.reason]
+    if (!leadStatus) continue
+    if (!byStatus[leadStatus]) byStatus[leadStatus] = new Set()
+    byStatus[leadStatus].add(entry.email.toLowerCase())
+  }
+
+  let totalReset = 0
+  for (const [leadStatus, emailSet] of Object.entries(byStatus)) {
+    // Fetch candidate leads with that status, filter by email case-insensitively
+    // (SQLite doesn't support mode:'insensitive', so we do it in JS).
+    const candidates = await db.lead.findMany({
+      where: { status: leadStatus },
+      select: { id: true, email: true },
+    })
+    const toReset = candidates.filter((l) => emailSet.has(l.email.toLowerCase()))
+    if (toReset.length > 0) {
+      await db.lead.updateMany({
+        where: { id: { in: toReset.map((l) => l.id) } },
+        data: {
+          status: 'active',
+          bouncedAt: null,
+          unsubscribedAt: null,
+        },
+      })
+      totalReset += toReset.length
+    }
+  }
+  return totalReset
+}
+
+// DELETE /api/extras/suppression/:id — remove one entry AND reset the
+// matching Lead(s) so sync won't re-add it.
 app.delete('/suppression/:id', async (c) => {
-  await db.suppressionList.delete({ where: { id: c.req.param('id') } }).catch(() => null)
-  return c.json({ ok: true })
+  const id = c.req.param('id')
+  const entry = await db.suppressionList.findUnique({ where: { id } })
+  if (!entry) {
+    return c.json({ error: 'Suppression entry not found (it may have already been deleted).' }, 404)
+  }
+
+  // Reset matching leads FIRST (while we still have the email/reason), then delete.
+  const leadsReset = await resetLeadsForEntries([entry])
+  await db.suppressionList.delete({ where: { id } })
+
+  return c.json({ ok: true, leadsReset, email: entry.email })
+})
+
+// DELETE /api/extras/suppression — bulk delete all entries (optionally
+// filtered by ?reason=) AND reset all matching Lead(s). Use this to clear
+// stale suppression data in one shot instead of clicking delete 100+ times.
+app.delete('/suppression', async (c) => {
+  const reason = c.req.query('reason') // optional: bounce | unsubscribe | complaint | manual
+  const where = reason ? { reason } : {}
+
+  const entries = await db.suppressionList.findMany({
+    where,
+    select: { email: true, reason: true },
+  })
+  if (entries.length === 0) {
+    return c.json({ ok: true, deleted: 0, leadsReset: 0 })
+  }
+
+  const leadsReset = await resetLeadsForEntries(entries)
+  await db.suppressionList.deleteMany({ where })
+
+  return c.json({ ok: true, deleted: entries.length, leadsReset })
 })
 
 // POST /api/extras/suppression/sync — backfill SuppressionList from Lead table.
