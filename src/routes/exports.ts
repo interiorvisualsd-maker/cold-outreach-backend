@@ -1,6 +1,5 @@
 import { Hono } from 'hono'
 import { db } from '../lib/db'
-import { pickVariant } from '../lib/variants'
 
 const app = new Hono()
 
@@ -193,8 +192,8 @@ app.post('/leads/bulk', async (c) => {
           campaignId: lead.campaignId,
           leadId: lead.id,
           stepNumber: 1,
-          subject: lead.outreachSubject || pickVariant(step1.subject),
-          body: lead.initialOutreach || pickVariant(step1.body),
+          subject: lead.outreachSubject || step1.subject,
+          body: lead.initialOutreach || step1.body,
           scheduledAt: new Date(Date.now() + Math.random() * 60 * 60 * 1000),
         },
       })
@@ -243,6 +242,139 @@ app.post('/leads/:id/suppress', async (c) => {
     data: { status: 'cancelled' },
   })
   return c.json({ ok: true, leadId, email, status: 'suppressed' })
+})
+
+// POST /api/extras/leads/verify — deep email verification for a campaign's leads.
+//
+// Runs multi-layer verification:
+//   1. Format check
+//   2. Disposable domain check
+//   3. Role-based address check
+//   4. MX record lookup
+//   5. SMTP mailbox verification (RCPT TO) — optional, slow
+//
+// Body: { campaignId, mode: 'quick' | 'deep', limit?: number }
+//   - quick = layers 1-4 only (fast, ~100ms/email)
+//   - deep = all 5 layers including SMTP RCPT TO (slow, ~1-5s/email)
+//
+// Invalid leads are:
+//   - Added to SuppressionList with reason 'bounce' and source 'email-verification'
+//   - Set to status 'bounced' with bouncedAt
+//   - Queued emails cancelled
+//
+// Returns immediately with a summary. The actual verification runs to
+// completion (the request is NOT async-backgrounded — it waits so the
+// caller gets the full result). For large lists, the caller should use a
+// limit and call repeatedly.
+app.post('/leads/verify', async (c) => {
+  const body = await c.req.json()
+  const { campaignId, mode = 'quick', limit = 100 } = body as {
+    campaignId: string
+    mode: 'quick' | 'deep'
+    limit?: number
+  }
+
+  if (!campaignId) return c.json({ error: 'campaignId required' }, 400)
+  if (!['quick', 'deep'].includes(mode)) {
+    return c.json({ error: 'mode must be "quick" or "deep"' }, 400)
+  }
+
+  const cappedLimit = Math.min(limit || 100, 500)
+
+  // Only verify leads that are still pending (not yet sent, not already
+  // bounced/suppressed/unsubscribed/replied)
+  const leads = await db.lead.findMany({
+    where: {
+      campaignId,
+      status: 'pending',
+    },
+    select: { id: true, email: true, campaign: { select: { name: true } } },
+    take: cappedLimit,
+  })
+
+  const { quickVerify, deepVerify } = await import('../lib/emailVerify')
+  const fromDomain = process.env.PUBLIC_BASE_URL
+    ? new URL(process.env.PUBLIC_BASE_URL.startsWith('http') ? process.env.PUBLIC_BASE_URL : `https://${process.env.PUBLIC_BASE_URL}`).hostname
+    : undefined
+
+  let valid = 0
+  let invalid = 0
+  let errors = 0
+  const invalidReasons: Record<string, number> = {}
+  const suppressedEmails: { email: string; reason: string; details?: string }[] = []
+
+  for (const lead of leads) {
+    try {
+      const result = mode === 'deep'
+        ? await deepVerify(lead.email, fromDomain)
+        : await quickVerify(lead.email)
+
+      if (result.valid) {
+        valid++
+      } else {
+        invalid++
+        const reasonKey = result.reason || 'unknown'
+        invalidReasons[reasonKey] = (invalidReasons[reasonKey] || 0) + 1
+        suppressedEmails.push({
+          email: lead.email.toLowerCase(),
+          reason: result.reason || 'verification_failed',
+          details: 'smtpDetails' in result ? (result as any).smtpDetails : undefined,
+        })
+      }
+    } catch {
+      errors++
+    }
+  }
+
+  // Batch-suppress all invalid emails in a single pass
+  let suppressed = 0
+  for (const entry of suppressedEmails) {
+    try {
+      await db.suppressionList.upsert({
+        where: { email_reason: { email: entry.email, reason: 'bounce' } },
+        create: {
+          email: entry.email,
+          reason: 'bounce',
+          source: `email-verification (${entry.reason})`,
+        },
+        update: {},
+      })
+      await db.lead.updateMany({
+        where: { email: { equals: entry.email, mode: 'insensitive' }, campaignId },
+        data: { status: 'bounced', bouncedAt: new Date() },
+      })
+      await db.scheduledEmail.updateMany({
+        where: {
+          lead: { email: { equals: entry.email, mode: 'insensitive' }, campaignId },
+          status: 'queued',
+        },
+        data: { status: 'cancelled' },
+      })
+      suppressed++
+    } catch {
+      // continue even if one suppress fails
+    }
+  }
+
+  // Push a notification with the results
+  const { pushNotification } = await import('../lib/notifications')
+  await pushNotification({
+    type: 'system',
+    severity: invalid > 0 ? 'warning' : 'success',
+    title: `Email verification complete (${mode})`,
+    message: `${valid} valid · ${invalid} invalid · ${errors} errors · ${suppressed} suppressed. ${Object.entries(invalidReasons).map(([k, v]) => `${k}: ${v}`).join(', ') || 'No issues found.'}`,
+  }).catch(() => {})
+
+  return c.json({
+    ok: true,
+    mode,
+    scanned: leads.length,
+    valid,
+    invalid,
+    errors,
+    suppressed,
+    invalidReasons,
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────

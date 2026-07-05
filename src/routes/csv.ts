@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import Papa from 'papaparse'
 import { db } from '../lib/db'
-import { validateEmail } from '../lib/email-validator'
+import { quickVerify } from '../lib/emailVerify'
 
 const app = new Hono()
 
@@ -187,6 +187,7 @@ app.post('/import', async (c) => {
   let duplicateCount = 0
   let suppressedCount = 0
   let invalidCount = 0
+  const verificationBreakdown: Record<string, number> = {}
 
   for (const row of rows) {
     const email = (row[reverse.emails] || '').toString().toLowerCase().trim()
@@ -194,6 +195,30 @@ app.post('/import', async (c) => {
       invalidCount++
       skipped.push({ row, reason: 'invalid_email' })
       continue
+    }
+    // ─── Multi-layer verification (format + disposable + role + MX) ───
+    // This runs synchronously during import so bad emails never enter the
+    // campaign queue. SMTP mailbox verification (deep check) is NOT run here
+    // — it's too slow (1-5s/email). Users can run it later via the "Verify
+    // Emails (Deep)" button on the campaign page.
+    try {
+      const verifyResult = await quickVerify(email)
+      if (!verifyResult.valid) {
+        invalidCount++
+        const reason = verifyResult.reason || 'verification_failed'
+        verificationBreakdown[reason] = (verificationBreakdown[reason] || 0) + 1
+        skipped.push({ row, reason })
+        // Auto-suppress the bad email so it can't be re-imported
+        await db.suppressionList.upsert({
+          where: { email_reason: { email, reason: 'bounce' } },
+          create: { email, reason: 'bounce', source: `csv-import (${reason})` },
+          update: {},
+        }).catch(() => null)
+        continue
+      }
+    } catch {
+      // If verification fails (e.g. DNS timeout), don't block the import —
+      // let the email through and let the deep verifier catch it later.
     }
     if (existingSet.has(email)) {
       duplicateCount++
@@ -206,13 +231,6 @@ app.post('/import', async (c) => {
       continue
     }
     existingSet.add(email) // prevent intra-batch dupes
-    // Validate email before adding (skip MX check during import for speed — use validate-leads endpoint after)
-    const domain = email.split('@')[1]?.toLowerCase()
-    if (domain && (isDisposableDomain(domain) || !isValidSyntaxQuick(email))) {
-      invalidCount++
-      skipped.push({ row, reason: 'invalid_or_disposable_email' })
-      continue
-    }
     toCreate.push({
       campaignId,
       email,
@@ -247,6 +265,7 @@ app.post('/import', async (c) => {
     duplicates: duplicateCount,
     suppressed: suppressedCount,
     invalid: invalidCount,
+    verificationBreakdown,
     skipped: skipped.slice(0, 50), // return first 50 skipped for review
   })
 })
@@ -264,18 +283,3 @@ app.get('/template', (c) => {
 })
 
 export default app
-
-
-// Quick checks (no network — fast)
-function isDisposableDomain(domain: string): boolean {
-  const disposable = new Set([
-    'mailinator.com', 'guerrillamail.com', 'tempmail.com', 'throwaway.email',
-    '10minutemail.com', 'temp-mail.org', 'fakeinbox.com', 'getnada.com',
-    'yopmail.com', 'sharklasers.com', 'example.com', 'example.org', 'test.com',
-  ])
-  return disposable.has(domain)
-}
-
-function isValidSyntaxQuick(email: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)
-}

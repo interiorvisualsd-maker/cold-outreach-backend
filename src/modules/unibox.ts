@@ -25,18 +25,8 @@ const BOUNCE_PATTERNS = [
   /address rejected/i,
   /550 /,
   /address not found/i,
-  /email doesn.?t exist/i,
   /email is a catch/i,
-  /sender not allowed/i,
-  /action required/i,
-  /tracking pixel/i,
-  /unknown user/i,
   /recipient (address )?rejected/i,
-  /recipient (was )?rejected/i,
-  /spam (detected|rejected)/i,
-  /blocked/i,
-  /quota exceeded/i,
-  /temporarily unavailable/i,
   /does not exist/i,
   /invalid recipient/i,
   /permanent error/i,
@@ -136,11 +126,28 @@ export async function processInboundReplies(): Promise<{
     where: { status: { not: 'suspended' } },
   })
 
-  const since = new Date(Date.now() - 24 * 60 * 60 * 1000)
+  // Look back 7 days (was 24h) — bounces/replies can arrive late, and since
+  // we now fetch read messages too, we need a wider window to catch anything
+  // the user saw on their phone before the app polled.
+  const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+
+  // Pre-load all EmailLog messageIds for these accounts in the window, so we
+  // can skip messages we've already processed (since we now fetch read + unread).
+  const recentLogs = await db.emailLog.findMany({
+    where: {
+      direction: 'inbound',
+      receivedAt: { gte: since },
+      messageId: { not: null },
+    },
+    select: { messageId: true },
+  })
+  const processedMessageIds = new Set(
+    recentLogs.map((l) => l.messageId).filter(Boolean) as string[]
+  )
 
   for (const account of accounts) {
     try {
-      const messages = await fetchUnreadMessages(account, since, 50)
+      const messages = await fetchUnreadMessages(account, since, 80)
       checked += messages.length
 
       for (const msg of messages) {
@@ -149,6 +156,17 @@ export async function processInboundReplies(): Promise<{
           (a) => a.emailAddress.toLowerCase() === msg.from.toLowerCase()
         )
         if (isFromPeer) continue
+
+        // ─── DEDUPE: skip messages we've already processed ───
+        // Since we now fetch ALL messages (read + unread) over a 7-day window,
+        // we MUST dedupe by messageId to avoid re-processing bounces/replies
+        // on every tick. EmailLog.messageId is our processed-message ledger.
+        if (msg.messageId && processedMessageIds.has(msg.messageId)) {
+          continue
+        }
+        // Track this messageId so we don't process it again in this same tick
+        // (in case two accounts received the same forwarded message)
+        if (msg.messageId) processedMessageIds.add(msg.messageId)
 
         const replyType = detectReplyType(msg.subject, msg.text)
 
@@ -321,8 +339,7 @@ export async function processInboundReplies(): Promise<{
         }
 
         // ─── BOUNCE → SUPPRESS + MARK EMAIL INVALID ───
-        // Only suppress if not already suppressed/bounced (prevents re-processing)
-        if (replyType === 'bounce' && lead.status !== 'bounced' && lead.status !== 'suppressed') {
+        if (replyType === 'bounce') {
           await db.suppressionList.upsert({
             where: { email_reason: { email: lead.email.toLowerCase(), reason: 'bounce' } },
             create: { email: lead.email.toLowerCase(), reason: 'bounce', source: lead.campaign?.name },

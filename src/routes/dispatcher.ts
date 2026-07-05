@@ -76,7 +76,7 @@ app.get('/queue', async (c) => {
 // POST /api/dispatcher/process — manually trigger a send batch (normally cron does this)
 app.post('/process', async (c) => {
   const { processSendBatch } = await import('../modules/dispatcher')
-  const result = await processSendBatch(50)
+  const result = await processSendBatch(3)
   return c.json(result)
 })
 

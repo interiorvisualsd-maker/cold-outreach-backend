@@ -31,7 +31,7 @@ function runWorker() {
       const { processWarmupBatch, processWarmupInbound, scheduleWarmupMessages } = await import('./modules/warmup')
       const { processInboundReplies } = await import('./modules/unibox')
 
-      await processSendBatch(30).catch((e) => console.error('[worker] send batch err:', e?.message))
+      await processSendBatch(3).catch((e) => console.error('[worker] send batch err:', e?.message))
       await processWarmupBatch(15).catch((e) => console.error('[worker] warmup send err:', e?.message))
       await processWarmupInbound().catch((e) => console.error('[worker] warmup inbound err:', e?.message))
       await processInboundReplies().catch((e) => console.error('[worker] unibox err:', e?.message))
