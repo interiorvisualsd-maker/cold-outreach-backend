@@ -1,0 +1,2 @@
+# Please do not edit this manually. It should be added in version control alongside all other migrations.
+provider = "postgresql"

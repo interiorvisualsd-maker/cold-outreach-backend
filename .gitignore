@@ -13,7 +13,8 @@ build/
 # Database
 *.db
 dev.db
-prisma/migrations/
+# NOTE: prisma/migrations/ is NOT ignored — migration files MUST be committed
+# so that `prisma migrate deploy` works in production (Render).
 
 # Logs
 *.log
