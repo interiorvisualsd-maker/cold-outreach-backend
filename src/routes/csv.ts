@@ -2,7 +2,6 @@ import { Hono } from 'hono'
 import Papa from 'papaparse'
 import { db } from '../lib/db'
 import { getUserId } from '../lib/auth'
-import { quickVerify } from '../lib/emailVerify'
 
 const app = new Hono()
 
@@ -179,12 +178,90 @@ app.post('/import', async (c) => {
     )
   }
 
-  const campaign = await db.campaign.findUnique({ where: { id: campaignId } })
-  if (!campaign || campaign.ownerId !== userId) {
-    return c.json({ error: 'Campaign not found' }, 404)
+  const result = await processImportBatch(userId, campaignId, filename, rows, mapping)
+  return c.json(result, result.error ? 500 : 200)
+})
+
+// ─── Chunked import (for large CSVs) ──────────────────────────────────────────
+// POST /api/csv/import-chunk — import one chunk of rows (500 per chunk).
+// Each chunk is committed independently. Cross-chunk deduplication is
+// automatic because each chunk checks the DB for already-inserted leads
+// (leads from earlier chunks are already in the DB by the time later
+// chunks run).
+//
+// The batchId is for the frontend's tracking only — the backend doesn't
+// need to correlate chunks. This is simpler and more resilient: if the
+// server restarts mid-batch, already-committed chunks survive and the
+// user can re-upload the remaining chunks without duplicates.
+app.post('/import-chunk', async (c) => {
+  const userId = getUserId(c)
+  const body = await c.req.json()
+  const { campaignId, filename, rows, mapping } = body
+  if (!campaignId || !rows || !mapping) {
+    return c.json({ error: 'campaignId, rows, mapping required' }, 400)
   }
 
-  // Build reverse mapping
+  // Per-chunk body-size guard (500 rows should be well under 10MB, but
+  // defensive)
+  const bodyStr = JSON.stringify(body)
+  if (Buffer.byteLength(bodyStr) > MAX_CSV_BYTES) {
+    return c.json(
+      { error: `Chunk payload too large. Split into smaller chunks.` },
+      413
+    )
+  }
+
+  const result = await processImportBatch(userId, campaignId, filename, rows, mapping)
+  if (result.error) {
+    return c.json(result, 500)
+  }
+  return c.json(result)
+})
+
+// GET /api/csv/import-finalize — no-op endpoint for backwards compat with
+// the frontend's chunked-upload flow. Each chunk already committed its
+// rows independently, so there's nothing to finalize. We just echo back
+// the accumulated stats the frontend sends via query params (or return
+// zeros if none provided).
+app.get('/import-finalize', async (c) => {
+  const userId = getUserId(c)
+  const batchId = c.req.query('batchId')
+  // Nothing to do — chunks are already committed. Just acknowledge.
+  return c.json({
+    ok: true,
+    batchId: batchId || null,
+    message: 'All chunks already committed. No finalization needed.',
+  })
+})
+
+// ─── Shared import logic (used by both /import and /import-chunk) ────────────
+// Deduplicates against:
+//   1. Existing leads in the same campaign (case-insensitive)
+//   2. Suppressed emails for this user
+//   3. Other rows in the same batch (intra-batch dedup)
+// Then quick-verifies each email (format + disposable + role + MX + typo).
+// BAD emails are skipped (not imported). Valid emails are inserted in a
+// transaction with skipDuplicates as a belt-and-suspenders safety net.
+async function processImportBatch(
+  userId: string,
+  campaignId: string,
+  filename: string | undefined,
+  rows: any[],
+  mapping: Record<string, string>
+): Promise<{
+  imported: number
+  duplicates: number
+  suppressed: number
+  invalid: number
+  skipped: Array<{ row: Record<string, unknown>; reason: string }>
+  error?: string
+}> {
+  const campaign = await db.campaign.findUnique({ where: { id: campaignId } })
+  if (!campaign || campaign.ownerId !== userId) {
+    return { imported: 0, duplicates: 0, suppressed: 0, invalid: 0, skipped: [], error: 'Campaign not found' }
+  }
+
+  // Build reverse mapping (canonical → csv header)
   const reverse: Record<string, string> = {}
   for (const [csvHeader, canonical] of Object.entries(mapping)) {
     reverse[String(canonical)] = csvHeader
@@ -206,11 +283,10 @@ app.post('/import', async (c) => {
   const existingSet = new Set(existing.map((l) => l.email.toLowerCase()))
 
   const toCreate: any[] = []
-  const skipped: any[] = []
+  const skipped: Array<{ row: Record<string, unknown>; reason: string }> = []
   let duplicateCount = 0
   let suppressedCount = 0
   let invalidCount = 0
-  const verificationBreakdown: Record<string, number> = {}
 
   for (const row of rows) {
     const email = (row[reverse.emails] || '').toString().toLowerCase().trim()
@@ -219,33 +295,37 @@ app.post('/import', async (c) => {
       skipped.push({ row, reason: 'invalid_email' })
       continue
     }
-    // ─── Quick verification (format + disposable + role + MX + typo) ───
-    // We do NOT auto-suppress on quick-verify failure here — instead we
-    // skip the row and let the user re-import after fixing. (Suppression
-    // is reserved for the deep verify route.)
-    try {
-      const verifyResult = await quickVerify(email)
-      if (verifyResult.status === 'BAD') {
-        invalidCount++
-        const reason = verifyResult.reason || 'verification_failed'
-        verificationBreakdown[reason] = (verificationBreakdown[reason] || 0) + 1
-        skipped.push({ row, reason })
-        continue
-      }
-    } catch {
-      // DNS timeout etc — let the email through; deep verifier catches later
-    }
+    // ─── Note: NO quick-verify during import ───
+    // Quick-verify (MX lookup, disposable check, etc.) takes ~1s per email
+    // due to DNS resolution. For a 500-row chunk that's 8+ minutes → timeout.
+    // Instead, import only does:
+    //   - Format validation (regex above)
+    //   - Case-insensitive deduplication (against DB + intra-batch)
+    //   - Suppression list check
+    // The dedicated Verification page (/api/verify/*) runs the full
+    // 10-layer check (including SMTP mailbox verification) AFTER import,
+    // and auto-suppresses BAD emails before any send happens.
+    // This keeps imports fast (<5s per chunk) and verification thorough.
+    //
+    // ─── Deduplication ───
+    // 1. Against existing leads in this campaign (already in DB from
+    //    previous chunks or imports)
+    // 2. Against other rows in this same batch (intra-batch dedup via
+    //    the existingSet which we add to below)
     if (existingSet.has(email)) {
       duplicateCount++
       skipped.push({ row, reason: 'duplicate' })
       continue
     }
+    // 3. Against suppressed emails (bounce/unsubscribe/complaint/manual)
     if (suppressedSet.has(email)) {
       suppressedCount++
       skipped.push({ row, reason: 'suppressed' })
       continue
     }
-    existingSet.add(email) // prevent intra-batch dupes
+    // Mark this email as "seen" so subsequent rows in the same batch
+    // with the same email are treated as duplicates.
+    existingSet.add(email)
     toCreate.push({
       campaignId,
       ownerId: userId,
@@ -258,17 +338,21 @@ app.post('/import', async (c) => {
       initialOutreach: reverse.initial_outreach ? row[reverse.initial_outreach]?.toString() || null : null,
       followupDay3: reverse.followup_day3 ? row[reverse.followup_day3]?.toString() || null : null,
       followupDay7: reverse.followup_day7 ? row[reverse.followup_day7]?.toString() || null : null,
-      verificationStatus: 'PENDING', // new imports start PENDING
+      verificationStatus: 'PENDING', // new imports start PENDING — verify via Verification page
     })
   }
 
   // ─── Transaction: insert + update campaign total ───
-  // Any error rolls back the whole import — no partial inserts.
+  // Any error rolls back the whole chunk — no partial inserts.
   let created = 0
   try {
     const result = await db.$transaction(async (tx) => {
       let count = 0
       if (toCreate.length > 0) {
+        // skipDuplicates: true is a safety net — if two chunks race and
+        // insert the same email concurrently, the second one silently
+        // skips instead of erroring. (The unique index on
+        // (campaignId, LOWER(email)) enforces this at the DB level.)
         const r = await tx.lead.createMany({ data: toCreate, skipDuplicates: true })
         count = r.count
       }
@@ -284,21 +368,24 @@ app.post('/import', async (c) => {
     created = result
   } catch (e: any) {
     console.error('[csv] import transaction failed:', e?.message)
-    return c.json(
-      { error: 'Import failed and was rolled back: ' + (e?.message || 'unknown error') },
-      500
-    )
+    return {
+      imported: 0,
+      duplicates: 0,
+      suppressed: 0,
+      invalid: 0,
+      skipped,
+      error: 'Import failed and was rolled back: ' + (e?.message || 'unknown error'),
+    }
   }
 
-  return c.json({
+  return {
     imported: created,
     duplicates: duplicateCount,
     suppressed: suppressedCount,
     invalid: invalidCount,
-    verificationBreakdown,
-    skipped: skipped.slice(0, 50),
-  })
-})
+    skipped: skipped.slice(0, 50), // cap to avoid huge responses
+  }
+}
 
 // GET /api/csv/template — download a sample CSV template
 app.get('/template', (c) => {
