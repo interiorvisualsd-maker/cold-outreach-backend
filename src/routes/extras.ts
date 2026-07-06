@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { db } from '../lib/db'
+import { getUserId } from '../lib/auth'
 import { validateEmail, validateEmailBatch, isValidSyntax, isDisposable, isRoleBased, hasMxRecords } from '../lib/email-validator'
 
 const app = new Hono()
@@ -10,16 +11,17 @@ const app = new Hono()
 // ─────────────────────────────────────────────────────────────────────────────
 
 app.post('/seed', async (c) => {
-  // Clear existing demo data (preserve users)
-  await db.emailLog.deleteMany()
-  await db.reply.deleteMany()
-  await db.warmupMessage.deleteMany()
-  await db.scheduledEmail.deleteMany()
-  await db.emailStep.deleteMany()
-  await db.lead.deleteMany()
-  await db.campaign.deleteMany()
-  await db.suppressionList.deleteMany()
-  await db.smtpAccount.deleteMany()
+  const userId = getUserId(c)
+  // Clear existing demo data OWNED BY THIS USER (preserve other users' data)
+  await db.emailLog.deleteMany({ where: { ownerId: userId } })
+  await db.reply.deleteMany({ where: { lead: { ownerId: userId } } })
+  await db.warmupMessage.deleteMany({ where: { fromAccount: { ownerId: userId } } })
+  await db.scheduledEmail.deleteMany({ where: { ownerId: userId } })
+  await db.emailStep.deleteMany({ where: { campaign: { ownerId: userId } } })
+  await db.lead.deleteMany({ where: { ownerId: userId } })
+  await db.campaign.deleteMany({ where: { ownerId: userId } })
+  await db.suppressionList.deleteMany({ where: { ownerId: userId } })
+  await db.smtpAccount.deleteMany({ where: { ownerId: userId } })
 
   // ─── 1. Create 4 sending accounts ───
   const accounts = []
@@ -32,6 +34,7 @@ app.post('/seed', async (c) => {
   for (const p of providers) {
     const acc = await db.smtpAccount.create({
       data: {
+        ownerId: userId,
         label: p.label,
         emailAddress: p.email,
         fromName: 'Alice from Acme',
@@ -57,6 +60,7 @@ app.post('/seed', async (c) => {
         warmupSentToday: Math.floor(Math.random() * 18) + 2,
         status: 'active',
         provider: p.provider,
+        lastDailyResetAt: new Date(),
       },
     })
     accounts.push(acc)
@@ -65,6 +69,7 @@ app.post('/seed', async (c) => {
   // ─── 2. Create 2 campaigns ───
   const campaign1 = await db.campaign.create({
     data: {
+      ownerId: userId,
       name: 'Q4 SaaS Founders Outreach',
       status: 'active',
       csvFilename: 'saas_founders_q4.csv',
@@ -77,6 +82,7 @@ app.post('/seed', async (c) => {
   })
   const campaign2 = await db.campaign.create({
     data: {
+      ownerId: userId,
       name: 'Agency Owners Follow-up',
       status: 'active',
       csvFilename: 'agency_list.csv',
@@ -153,6 +159,7 @@ app.post('/seed', async (c) => {
         const lead = await db.lead.create({
           data: {
             campaignId: campaign.id,
+            ownerId: userId,
             email,
             companyName: company.name,
             website: company.domain,
@@ -179,6 +186,7 @@ app.post('/seed', async (c) => {
               data: {
                 campaignId: campaign.id,
                 leadId: lead.id,
+                ownerId: userId,
                 stepNumber: step,
                 smtpAccountId: accounts[Math.floor(Math.random() * accounts.length)].id,
                 subject: step === 1 ? `Quick question about ${company.name}` : `Re: Quick question`,
@@ -190,13 +198,15 @@ app.post('/seed', async (c) => {
             })
           }
           // Queue the next step
-          if (status !== 'replied' && status !== 'bounced' && status !== 'unsubscribed') {
-            const nextStep = status === 'step1_sent' ? 2 : status === 'step2_sent' ? 3 : null
+          const statusStr: string = status
+          if (statusStr !== 'replied' && statusStr !== 'bounced' && statusStr !== 'unsubscribed') {
+            const nextStep = statusStr === 'step1_sent' ? 2 : statusStr === 'step2_sent' ? 3 : null
             if (nextStep) {
               await db.scheduledEmail.create({
                 data: {
                   campaignId: campaign.id,
                   leadId: lead.id,
+                  ownerId: userId,
                   stepNumber: nextStep,
                   subject: `Re: Quick question`,
                   body: `Following up...`,
@@ -259,10 +269,10 @@ app.post('/seed', async (c) => {
   // ─── 5. Create suppression list entries ───
   await db.suppressionList.createMany({
     data: [
-      { email: 'bounced1@example.com', reason: 'bounce', source: 'Q4 SaaS Founders Outreach' },
-      { email: 'bounced2@example.com', reason: 'bounce', source: 'Q4 SaaS Founders Outreach' },
-      { email: 'unsub1@example.com', reason: 'unsubscribe', source: 'Agency Owners Follow-up' },
-      { email: 'unsub2@example.com', reason: 'complaint', source: 'Q4 SaaS Founders Outreach' },
+      { ownerId: userId, email: 'bounced1@example.com', reason: 'bounce', source: 'Q4 SaaS Founders Outreach' },
+      { ownerId: userId, email: 'bounced2@example.com', reason: 'bounce', source: 'Q4 SaaS Founders Outreach' },
+      { ownerId: userId, email: 'unsub1@example.com', reason: 'unsubscribe', source: 'Agency Owners Follow-up' },
+      { ownerId: userId, email: 'unsub2@example.com', reason: 'complaint', source: 'Q4 SaaS Founders Outreach' },
     ],
   })
 
@@ -282,12 +292,13 @@ app.post('/seed', async (c) => {
 // DASHBOARD ANALYTICS — 7-day trend + deliverability score + activity feed
 // ─────────────────────────────────────────────────────────────────────────────
 app.get('/analytics', async (c) => {
+  const userId = getUserId(c)
   const now = new Date()
   const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
 
   // 7-day send trend
   const sentEmails = await db.scheduledEmail.findMany({
-    where: { status: 'sent', sentAt: { gte: sevenDaysAgo } },
+    where: { ownerId: userId, status: 'sent', sentAt: { gte: sevenDaysAgo } },
     select: { sentAt: true },
   })
   const trend: { date: string; sent: number }[] = []
@@ -303,6 +314,7 @@ app.get('/analytics', async (c) => {
 
   // Reply stats by sentiment
   const replies = await db.reply.findMany({
+    where: { lead: { ownerId: userId } },
     select: { sentiment: true, receivedAt: true },
   })
   const sentimentBreakdown = {
@@ -315,9 +327,9 @@ app.get('/analytics', async (c) => {
   }
 
   // Deliverability score (0-100)
-  const totalSent = await db.scheduledEmail.count({ where: { status: 'sent' } })
-  const totalBounced = await db.lead.count({ where: { status: 'bounced' } })
-  const totalUnsub = await db.suppressionList.count({ where: { reason: 'unsubscribe' } })
+  const totalSent = await db.scheduledEmail.count({ where: { ownerId: userId, status: 'sent' } })
+  const totalBounced = await db.lead.count({ where: { ownerId: userId, status: 'bounced' } })
+  const totalUnsub = await db.suppressionList.count({ where: { ownerId: userId, reason: 'unsubscribe' } })
   const totalReplies = replies.length
   const replyRate = totalSent > 0 ? (totalReplies / totalSent) * 100 : 0
   const bounceRate = totalSent > 0 ? (totalBounced / totalSent) * 100 : 0
@@ -327,12 +339,13 @@ app.get('/analytics', async (c) => {
 
   // Recent activity feed (last 15 events)
   const recentSent = await db.scheduledEmail.findMany({
-    where: { status: 'sent' },
+    where: { ownerId: userId, status: 'sent' },
     include: { lead: { select: { email: true, companyName: true } }, campaign: { select: { name: true } } },
     orderBy: { sentAt: 'desc' },
     take: 8,
   })
   const recentReplies = await db.reply.findMany({
+    where: { lead: { ownerId: userId } },
     include: { lead: { select: { email: true, companyName: true } } },
     orderBy: { receivedAt: 'desc' },
     take: 7,
@@ -379,11 +392,12 @@ app.get('/analytics', async (c) => {
 // SUPPRESSION LIST — manage unsubscribed / bounced / complained emails
 // ─────────────────────────────────────────────────────────────────────────────
 app.get('/suppression', async (c) => {
+  const userId = getUserId(c)
   const page = parseInt(c.req.query('page') || '1')
   const limit = Math.min(parseInt(c.req.query('limit') || '50'), 200)
   const reason = c.req.query('reason')
 
-  const where: any = {}
+  const where: any = { ownerId: userId }
   if (reason) where.reason = reason
 
   const [items, total] = await Promise.all([
@@ -399,6 +413,7 @@ app.get('/suppression', async (c) => {
   const byReason = await db.suppressionList.groupBy({
     by: ['reason'],
     _count: true,
+    where: { ownerId: userId },
   })
 
   return c.json({ items, total, page, limit, pages: Math.ceil(total / limit), byReason })
@@ -420,6 +435,7 @@ const LEAD_STATUS_BY_REASON: Record<string, string> = {
 
 async function resetLeadsForEntries(
   entries: { email: string; reason: string }[],
+  ownerId: string,
 ): Promise<number> {
   if (entries.length === 0) return 0
 
@@ -434,10 +450,9 @@ async function resetLeadsForEntries(
 
   let totalReset = 0
   for (const [leadStatus, emailSet] of Object.entries(byStatus)) {
-    // Fetch candidate leads with that status, filter by email case-insensitively
-    // (SQLite doesn't support mode:'insensitive', so we do it in JS).
+    // Fetch candidate leads with that status for this owner.
     const candidates = await db.lead.findMany({
-      where: { status: leadStatus },
+      where: { status: leadStatus, ownerId },
       select: { id: true, email: true },
     })
     const toReset = candidates.filter((l) => emailSet.has(l.email.toLowerCase()))
@@ -459,15 +474,16 @@ async function resetLeadsForEntries(
 // DELETE /api/extras/suppression/:id — remove one entry AND reset the
 // matching Lead(s) so sync won't re-add it.
 app.delete('/suppression/:id', async (c) => {
+  const userId = getUserId(c)
   const id = c.req.param('id')
   const entry = await db.suppressionList.findUnique({ where: { id } })
-  if (!entry) {
-    console.log(`[suppression] DELETE /${id} → 404 (not found)`)
+  if (!entry || entry.ownerId !== userId) {
+    console.log(`[suppression] DELETE /${id} → 404 (not found or not owned)`)
     return c.json({ error: 'Suppression entry not found (it may have already been deleted).' }, 404)
   }
 
   // Reset matching leads FIRST (while we still have the email/reason), then delete.
-  const leadsReset = await resetLeadsForEntries([entry])
+  const leadsReset = await resetLeadsForEntries([entry], userId)
   await db.suppressionList.delete({ where: { id } })
   console.log(`[suppression] DELETE /${id} → 200 · removed ${entry.email} (${entry.reason}) · ${leadsReset} lead(s) reset to active`)
 
@@ -478,8 +494,10 @@ app.delete('/suppression/:id', async (c) => {
 // filtered by ?reason=) AND reset all matching Lead(s). Use this to clear
 // stale suppression data in one shot instead of clicking delete 100+ times.
 app.delete('/suppression', async (c) => {
+  const userId = getUserId(c)
   const reason = c.req.query('reason') // optional: bounce | unsubscribe | complaint | manual
-  const where = reason ? { reason } : {}
+  const where: any = { ownerId: userId }
+  if (reason) where.reason = reason
 
   const entries = await db.suppressionList.findMany({
     where,
@@ -490,7 +508,7 @@ app.delete('/suppression', async (c) => {
     return c.json({ ok: true, deleted: 0, leadsReset: 0 })
   }
 
-  const leadsReset = await resetLeadsForEntries(entries)
+  const leadsReset = await resetLeadsForEntries(entries, userId)
   await db.suppressionList.deleteMany({ where })
   console.log(`[suppression] BULK DELETE${reason ? ` (reason=${reason})` : ''} → 200 · removed ${entries.length} entries · ${leadsReset} lead(s) reset to active`)
 
@@ -503,6 +521,7 @@ app.delete('/suppression', async (c) => {
 // This fixes historical drift where leads had a suppressed/bounced status but no
 // matching SuppressionList row (e.g. from old bounce handling that didn't insert).
 app.post('/suppression/sync', async (c) => {
+  const userId = getUserId(c)
   const TARGET_STATUSES = ['bounced', 'suppressed', 'unsubscribed'] as const
   const STATUS_TO_REASON: Record<string, 'bounce' | 'manual' | 'unsubscribe'> = {
     bounced: 'bounce',
@@ -511,21 +530,21 @@ app.post('/suppression/sync', async (c) => {
   }
 
   const leads = await db.lead.findMany({
-    where: { status: { in: [...TARGET_STATUSES] } },
+    where: { status: { in: [...TARGET_STATUSES] }, ownerId: userId },
     select: { id: true, email: true, status: true, campaign: { select: { name: true } } },
   })
 
   // Get current set of (email, reason) pairs already in SuppressionList for these emails
   const emails = leads.map((l) => l.email.toLowerCase()).filter(Boolean)
   const existing = await db.suppressionList.findMany({
-    where: { email: { in: emails } },
+    where: { email: { in: emails }, ownerId: userId },
     select: { email: true, reason: true },
   })
   const existingSet = new Set(existing.map((e) => `${e.email}|${e.reason}`))
 
   let added = 0
   let skipped = 0
-  const toCreate: { email: string; reason: string; source: string | null }[] = []
+  const toCreate: { ownerId: string; email: string; reason: string; source: string | null }[] = []
 
   for (const lead of leads) {
     if (!lead.email) continue
@@ -538,10 +557,11 @@ app.post('/suppression/sync', async (c) => {
       continue
     }
     toCreate.push({
+      ownerId: userId,
       email,
       reason,
       source: lead.campaign?.name || `sync-from-status:${lead.status}`,
-    })
+    } as any)
   }
 
   if (toCreate.length > 0) {
@@ -560,7 +580,7 @@ app.post('/suppression/sync', async (c) => {
 
   // Also report how many leads are out of sync (for the warning banner)
   const totalLeadsWithStatus = leads.length
-  const totalSuppressionEntries = await db.suppressionList.count()
+  const totalSuppressionEntries = await db.suppressionList.count({ where: { ownerId: userId } })
 
   return c.json({
     ok: true,
@@ -575,13 +595,14 @@ app.post('/suppression/sync', async (c) => {
 // GET /api/extras/suppression/sync-status — quick check of how many leads are
 // out of sync with SuppressionList (for the warning banner on the frontend).
 app.get('/suppression/sync-status', async (c) => {
+  const userId = getUserId(c)
   const leads = await db.lead.findMany({
-    where: { status: { in: ['bounced', 'suppressed', 'unsubscribed'] } },
+    where: { status: { in: ['bounced', 'suppressed', 'unsubscribed'] }, ownerId: userId },
     select: { email: true, status: true },
   })
   const emails = leads.map((l) => l.email.toLowerCase()).filter(Boolean)
   const existing = await db.suppressionList.findMany({
-    where: { email: { in: emails } },
+    where: { email: { in: emails }, ownerId: userId },
     select: { email: true, reason: true },
   })
   const existingSet = new Set(existing.map((e) => `${e.email}|${e.reason}`))
@@ -610,12 +631,13 @@ app.get('/suppression/sync-status', async (c) => {
 })
 
 app.post('/suppression', async (c) => {
+  const userId = getUserId(c)
   const body = await c.req.json()
   const { email, reason, source } = body
   if (!email || !reason) return c.json({ error: 'email and reason required' }, 400)
   const entry = await db.suppressionList.upsert({
     where: { email_reason: { email: email.toLowerCase(), reason } },
-    create: { email: email.toLowerCase(), reason, source },
+    create: { ownerId: userId, email: email.toLowerCase(), reason, source },
     update: {},
   })
   return c.json({ entry })
@@ -895,17 +917,19 @@ app.post('/notifications/seed-demo', async (c) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 app.get('/search/leads', async (c) => {
+  const userId = getUserId(c)
   const q = c.req.query('q') || ''
   if (q.length < 2) return c.json({ results: [] })
   const limit = Math.min(parseInt(c.req.query('limit') || '10'), 20)
 
-  // Search by email OR company name OR website
+  // Search by email OR company name OR website (scoped to current user)
   const results = await db.lead.findMany({
     where: {
+      ownerId: userId,
       OR: [
-        { email: { contains: q } },
-        { companyName: { contains: q } },
-        { website: { contains: q } },
+        { email: { contains: q, mode: 'insensitive' } },
+        { companyName: { contains: q, mode: 'insensitive' } },
+        { website: { contains: q, mode: 'insensitive' } },
       ],
     },
     orderBy: { updatedAt: 'desc' },
@@ -934,11 +958,13 @@ app.get('/search/leads', async (c) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 app.get('/leads/:id/detail', async (c) => {
+  const userId = getUserId(c)
   const id = c.req.param('id')
   const lead = await db.lead.findUnique({
     where: { id },
     select: {
       id: true,
+      ownerId: true,
       email: true,
       companyName: true,
       website: true,
@@ -959,7 +985,7 @@ app.get('/leads/:id/detail', async (c) => {
       campaign: { select: { id: true, name: true, status: true } },
     },
   })
-  if (!lead) return c.json({ error: 'Lead not found' }, 404)
+  if (!lead || lead.ownerId !== userId) return c.json({ error: 'Lead not found' }, 404)
 
   const [emails, replies] = await Promise.all([
     db.scheduledEmail.findMany({
@@ -1124,14 +1150,14 @@ app.post('/unsubscribe/:leadId', async (c) => {
   const leadId = c.req.param('leadId')
   const lead = await db.lead.findUnique({
     where: { id: leadId },
-    select: { id: true, email: true, campaignId: true, campaign: { select: { name: true } } },
+    select: { id: true, email: true, ownerId: true, campaignId: true, campaign: { select: { name: true } } },
   })
   if (!lead) return c.json({ error: 'Invalid unsubscribe link' }, 404)
 
   if (lead.email) {
     await db.suppressionList.upsert({
       where: { email_reason: { email: lead.email.toLowerCase(), reason: 'unsubscribe' } },
-      create: { email: lead.email.toLowerCase(), reason: 'unsubscribe', source: lead.campaign?.name || 'unsubscribe-link' },
+      create: { ownerId: lead.ownerId, email: lead.email.toLowerCase(), reason: 'unsubscribe', source: lead.campaign?.name || 'unsubscribe-link' },
       update: {},
     })
   }
@@ -1374,30 +1400,21 @@ app.post('/notification-prefs/test', async (c) => {
   return c.json({ ok: true, message: 'Test notification sent' })
 })
 
-// CLEAR ALL DATA — wipes everything except users (for production go-live)
+// CLEAR ALL DATA — wipes everything OWNED BY THE CURRENT USER (preserves
+// other users' data + User table). For production go-live.
 app.post('/clear-all', async (c) => {
-  await db.emailLog.deleteMany()
-  await db.reply.deleteMany()
-  await db.warmupMessage.deleteMany()
-  await db.scheduledEmail.deleteMany()
-  await db.emailStep.deleteMany()
-  await db.lead.deleteMany()
-  await db.campaign.deleteMany()
-  await db.suppressionList.deleteMany()
-  await db.smtpAccount.deleteMany()
+  const userId = getUserId(c)
+  await db.emailLog.deleteMany({ where: { ownerId: userId } })
+  await db.reply.deleteMany({ where: { lead: { ownerId: userId } } })
+  await db.warmupMessage.deleteMany({ where: { fromAccount: { ownerId: userId } } })
+  await db.scheduledEmail.deleteMany({ where: { ownerId: userId } })
+  await db.emailStep.deleteMany({ where: { campaign: { ownerId: userId } } })
+  await db.lead.deleteMany({ where: { ownerId: userId } })
+  await db.campaign.deleteMany({ where: { ownerId: userId } })
+  await db.suppressionList.deleteMany({ where: { ownerId: userId } })
+  await db.smtpAccount.deleteMany({ where: { ownerId: userId } })
 
-  await db.setting.deleteMany({
-    where: {
-      OR: [
-        { key: 'notifications' },
-        { key: 'webhook_deliveries' },
-        { key: 'templates' },
-        { key: 'webhooks' },
-      ]
-    }
-  })
-
-  return c.json({ ok: true, message: 'All data cleared (users preserved)' })
+  return c.json({ ok: true, message: 'All data cleared for current user (users preserved)' })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1442,9 +1459,10 @@ app.post('/validate-single', async (c) => {
 // POST /api/extras/campaigns/:id/validate-leads — validate all leads in a campaign
 // POST /api/extras/campaigns/:id/validate-leads — async, returns immediately
 app.post('/campaigns/:id/validate-leads', async (c) => {
+  const userId = getUserId(c)
   const campaignId = c.req.param('id')
   const leads = await db.lead.findMany({
-    where: { campaignId, status: { in: ['pending', 'step1_sent', 'step2_sent', 'step3_sent'] } },
+    where: { campaignId, ownerId: userId, status: { in: ['pending', 'step1_sent', 'step2_sent', 'step3_sent'] } },
     select: { id: true, email: true },
   })
 
@@ -1471,7 +1489,7 @@ app.post('/campaigns/:id/validate-leads', async (c) => {
         if (!result.valid) {
           await db.suppressionList.upsert({
             where: { email_reason: { email: lead.email.toLowerCase(), reason: 'bounce' } },
-            create: { email: lead.email.toLowerCase(), reason: 'bounce', source: `Pre-send validation: ${result.reason}` },
+            create: { ownerId: userId, email: lead.email.toLowerCase(), reason: 'bounce', source: `Pre-send validation: ${result.reason}` },
             update: {},
           }).catch(() => {})
           await db.lead.update({ where: { id: lead.id }, data: { status: 'suppressed' } }).catch(() => {})
@@ -1510,9 +1528,10 @@ app.post('/campaigns/:id/validate-leads', async (c) => {
 
 // GET /api/extras/campaigns/:id/validation-stats — get validation status for a campaign
 app.get('/campaigns/:id/validation-stats', async (c) => {
+  const userId = getUserId(c)
   const campaignId = c.req.param('id')
   const leads = await db.lead.findMany({
-    where: { campaignId },
+    where: { campaignId, ownerId: userId },
     select: { email: true, status: true },
   })
 
@@ -1542,7 +1561,9 @@ app.get('/campaigns/:id/validation-stats', async (c) => {
 // GET /api/extras/verification/campaigns — summary of ALL campaigns with
 // verification stats. Powers the verification dashboard list view.
 app.get('/verification/campaigns', async (c) => {
+  const userId = getUserId(c)
   const campaigns = await db.campaign.findMany({
+    where: { ownerId: userId },
     select: {
       id: true, name: true, status: true, totalLeads: true, createdAt: true, updatedAt: true,
     },
@@ -1594,6 +1615,7 @@ app.get('/verification/campaigns', async (c) => {
 // Query: status=valid|warning|invalid|pending|all, mode=quick|deep|all,
 //        q=search term, page=1, pageSize=50
 app.get('/verification/campaign/:id/leads', async (c) => {
+  const userId = getUserId(c)
   const campaignId = c.req.param('id')
   const status = c.req.query('status') || 'all'
   const mode = c.req.query('mode') || 'all'
@@ -1601,7 +1623,7 @@ app.get('/verification/campaign/:id/leads', async (c) => {
   const page = Math.max(1, parseInt(c.req.query('page') || '1', 10))
   const pageSize = Math.min(200, Math.max(10, parseInt(c.req.query('pageSize') || '50', 10)))
 
-  const where: any = { campaignId }
+  const where: any = { campaignId, ownerId: userId }
   if (status === 'valid') where.verificationStatus = 'valid'
   else if (status === 'warning') where.verificationStatus = 'warning'
   else if (status === 'invalid') where.verificationStatus = 'invalid'
@@ -1651,15 +1673,16 @@ app.get('/verification/campaign/:id/leads', async (c) => {
 // POST /api/extras/verification/leads/:id/reverify — re-verify a single lead.
 // Clears the old verification result and runs the specified mode.
 app.post('/verification/leads/:id/reverify', async (c) => {
+  const userId = getUserId(c)
   const leadId = c.req.param('id')
   const body = await c.req.json().catch(() => ({}))
   const mode = (body.mode === 'deep' ? 'deep' : 'quick') as 'quick' | 'deep'
 
   const lead = await db.lead.findUnique({
     where: { id: leadId },
-    select: { id: true, email: true, campaignId: true, status: true },
+    select: { id: true, ownerId: true, email: true, campaignId: true, status: true },
   })
-  if (!lead) return c.json({ error: 'Lead not found' }, 404)
+  if (!lead || lead.ownerId !== userId) return c.json({ error: 'Lead not found' }, 404)
 
   const { quickVerify, deepVerify } = await import('../lib/emailVerify')
   const fromDomain = process.env.PUBLIC_BASE_URL
@@ -1667,7 +1690,7 @@ app.post('/verification/leads/:id/reverify', async (c) => {
     : undefined
 
   const result = mode === 'deep'
-    ? await deepVerify(lead.email, fromDomain)
+    ? await deepVerify(lead.email)
     : await quickVerify(lead.email)
 
   const checks: Record<string, string> = {}
@@ -1727,7 +1750,7 @@ app.post('/verification/leads/:id/reverify', async (c) => {
     const emailLower = lead.email.toLowerCase()
     await db.suppressionList.upsert({
       where: { email_reason: { email: emailLower, reason: 'bounce' } },
-      create: { email: emailLower, reason: 'bounce', source: `re-verify (${reason})` },
+      create: { ownerId: userId, email: emailLower, reason: 'bounce', source: `re-verify (${reason})` },
       update: {},
     }).catch(() => {})
     await db.scheduledEmail.updateMany({
@@ -1759,17 +1782,18 @@ app.post('/verification/leads/:id/reverify', async (c) => {
 // (e.g. a warning lead the user decides not to email). Adds to SuppressionList,
 // sets Lead.status='suppressed', cancels queued emails.
 app.post('/verification/leads/:id/suppress', async (c) => {
+  const userId = getUserId(c)
   const leadId = c.req.param('id')
   const lead = await db.lead.findUnique({
     where: { id: leadId },
-    select: { id: true, email: true, campaign: { select: { name: true } } },
+    select: { id: true, ownerId: true, email: true, campaign: { select: { name: true } } },
   })
-  if (!lead) return c.json({ error: 'Lead not found' }, 404)
+  if (!lead || lead.ownerId !== userId) return c.json({ error: 'Lead not found' }, 404)
 
   const email = lead.email.toLowerCase()
   await db.suppressionList.upsert({
     where: { email_reason: { email, reason: 'manual' } },
-    create: { email, reason: 'manual', source: `verification-dashboard (${lead.campaign?.name || ''})` },
+    create: { ownerId: userId, email, reason: 'manual', source: `verification-dashboard (${lead.campaign?.name || ''})` },
     update: {},
   })
   await db.lead.update({
@@ -1788,16 +1812,17 @@ app.post('/verification/leads/:id/suppress', async (c) => {
 // status so it shows as unverified). Used when the user decides a warning
 // lead is actually fine to email.
 app.post('/verification/leads/:id/restore', async (c) => {
+  const userId = getUserId(c)
   const leadId = c.req.param('id')
   const lead = await db.lead.findUnique({
     where: { id: leadId },
-    select: { id: true, email: true },
+    select: { id: true, ownerId: true, email: true },
   })
-  if (!lead) return c.json({ error: 'Lead not found' }, 404)
+  if (!lead || lead.ownerId !== userId) return c.json({ error: 'Lead not found' }, 404)
 
   const email = lead.email.toLowerCase()
   await db.suppressionList.deleteMany({
-    where: { email },
+    where: { email, ownerId: userId },
   }).catch(() => {})
   await db.lead.update({
     where: { id: leadId },

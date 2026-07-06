@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { db } from '../lib/db'
-import { getUser } from '../lib/auth'
+import { getUserId } from '../lib/auth'
 import { encrypt, decrypt } from '../lib/crypto'
 import { verifySmtp, clearTransportCache } from '../lib/smtp'
 import { getImapClient } from '../lib/imap'
@@ -31,12 +31,13 @@ const createSchema = z.object({
   warmupTargetMax: z.number().int().min(5).max(50).default(20),
 })
 
-// GET /api/accounts — list all
+// GET /api/accounts — list all (scoped to current user)
 app.get('/', async (c) => {
+  const userId = getUserId(c)
   const accounts = await db.smtpAccount.findMany({
+    where: { ownerId: userId },
     orderBy: { createdAt: 'desc' },
   })
-  // Strip encrypted passwords
   const safe = accounts.map((a) => ({
     ...a,
     smtpPassEnc: undefined,
@@ -48,14 +49,16 @@ app.get('/', async (c) => {
 
 // GET /api/accounts/:id
 app.get('/:id', async (c) => {
+  const userId = getUserId(c)
   const account = await db.smtpAccount.findUnique({ where: { id: c.req.param('id') } })
-  if (!account) return c.json({ error: 'Not found' }, 404)
+  if (!account || account.ownerId !== userId) return c.json({ error: 'Not found' }, 404)
   const { smtpPassEnc, imapPassEnc, ...safe } = account
   return c.json({ account: safe })
 })
 
 // POST /api/accounts — create (auto-verifies SMTP + IMAP before saving)
 app.post('/', async (c) => {
+  const userId = getUserId(c)
   const body = await c.req.json()
   const parsed = createSchema.safeParse(body)
   if (!parsed.success) {
@@ -66,6 +69,7 @@ app.post('/', async (c) => {
   // Create a temporary account object for testing (not saved to DB yet)
   const tempAccount = {
     id: 'temp-' + Date.now(),
+    ownerId: userId,
     label: d.label,
     emailAddress: d.emailAddress,
     fromName: d.fromName,
@@ -80,6 +84,23 @@ app.post('/', async (c) => {
     imapPassEnc: encrypt(d.imapPass),
     imapSecure: d.imapSecure,
     provider: d.provider,
+    dailyCap: d.dailyCap,
+    hourlyCap: d.hourlyCap,
+    warmupEnabled: d.warmupEnabled,
+    warmupState: 'cold',
+    warmupDay: 0,
+    warmupTargetMax: d.warmupTargetMax,
+    warmupStartQty: d.warmupStartQty,
+    warmupIncrement: d.warmupIncrement,
+    warmupSentToday: 0,
+    sentToday: 0,
+    failureStreak: 0,
+    lastResetAt: new Date(),
+    lastDailyResetAt: new Date(),
+    lastSentAt: null,
+    status: 'active',
+    createdAt: new Date(),
+    updatedAt: new Date(),
   } as any
 
   // Test SMTP connection
@@ -102,7 +123,6 @@ app.post('/', async (c) => {
   } catch (e: any) {
     imapError = e?.message
   }
-
   if (!imapOk) {
     return c.json({
       error: `IMAP verification failed: ${imapError}`,
@@ -111,11 +131,12 @@ app.post('/', async (c) => {
     }, 400)
   }
 
-  // Both passed — save the account
+  // Both passed — save the account (ownerId scoping)
   const account = await db.smtpAccount.create({
     data: {
+      ownerId: userId,
       label: d.label,
-      emailAddress: d.emailAddress,
+      emailAddress: d.emailAddress.toLowerCase(),
       fromName: d.fromName,
       smtpHost: d.smtpHost,
       smtpPort: d.smtpPort,
@@ -134,19 +155,21 @@ app.post('/', async (c) => {
       warmupStartQty: d.warmupStartQty,
       warmupIncrement: d.warmupIncrement,
       warmupTargetMax: d.warmupTargetMax,
+      lastDailyResetAt: new Date(),
     },
   })
   return c.json({ account: { ...account, smtpPassEnc: undefined, imapPassEnc: undefined }, verified: true })
 })
 
-// PUT /api/accounts/:id — update (credentials optional, auto-verifies if changed)
+// PUT /api/accounts/:id — update (credentials optional)
 app.put('/:id', async (c) => {
+  const userId = getUserId(c)
   const id = c.req.param('id')
-  const body = await c.req.json()
   const existing = await db.smtpAccount.findUnique({ where: { id } })
-  if (!existing) return c.json({ error: 'Not found' }, 404)
+  if (!existing || existing.ownerId !== userId) return c.json({ error: 'Not found' }, 404)
 
-  // If SMTP or IMAP credentials are being changed, verify them first
+  const body = await c.req.json()
+
   if (body.smtpPass || body.imapPass || body.smtpHost || body.imapHost || body.smtpPort || body.imapPort) {
     const testAccount = {
       ...existing,
@@ -162,7 +185,6 @@ app.put('/:id', async (c) => {
     if (!smtpResult.ok) {
       return c.json({ error: `SMTP verification failed: ${smtpResult.error}`, field: 'smtp' }, 400)
     }
-
     try {
       const client = await getImapClient(testAccount)
       await client.logout()
@@ -173,7 +195,7 @@ app.put('/:id', async (c) => {
 
   const data: any = {
     label: body.label,
-    emailAddress: body.emailAddress,
+    emailAddress: body.emailAddress ? String(body.emailAddress).toLowerCase() : undefined,
     fromName: body.fromName,
     smtpHost: body.smtpHost,
     smtpPort: body.smtpPort,
@@ -191,10 +213,8 @@ app.put('/:id', async (c) => {
     warmupIncrement: body.warmupIncrement,
     warmupTargetMax: body.warmupTargetMax,
   }
-  // Only re-encrypt if new password provided
   if (body.smtpPass) data.smtpPassEnc = encrypt(body.smtpPass)
   if (body.imapPass) data.imapPassEnc = encrypt(body.imapPass)
-  // Remove undefined fields
   Object.keys(data).forEach((k) => data[k] === undefined && delete data[k])
 
   const account = await db.smtpAccount.update({ where: { id }, data })
@@ -204,20 +224,23 @@ app.put('/:id', async (c) => {
 
 // DELETE /api/accounts/:id
 app.delete('/:id', async (c) => {
+  const userId = getUserId(c)
   const id = c.req.param('id')
+  const existing = await db.smtpAccount.findUnique({ where: { id } })
+  if (!existing || existing.ownerId !== userId) return c.json({ error: 'Not found' }, 404)
   await db.smtpAccount.delete({ where: { id } }).catch(() => null)
   clearTransportCache(id)
   return c.json({ ok: true })
 })
 
-// POST /api/accounts/:id/test — verify SMTP + IMAP connectivity
+// POST /api/accounts/:id/test
 app.post('/:id/test', async (c) => {
+  const userId = getUserId(c)
   const id = c.req.param('id')
   const account = await db.smtpAccount.findUnique({ where: { id } })
-  if (!account) return c.json({ error: 'Not found' }, 404)
+  if (!account || account.ownerId !== userId) return c.json({ error: 'Not found' }, 404)
 
   const smtpResult = await verifySmtp(account)
-
   let imapOk = false
   let imapError: string | undefined
   try {
@@ -227,26 +250,33 @@ app.post('/:id/test', async (c) => {
   } catch (e: any) {
     imapError = e?.message
   }
-
   return c.json({
     smtp: { ok: smtpResult.ok, error: smtpResult.error },
     imap: { ok: imapOk, error: imapError },
   })
 })
 
-// POST /api/accounts/:id/pause — pause sending
+// POST /api/accounts/:id/pause
 app.post('/:id/pause', async (c) => {
+  const userId = getUserId(c)
+  const id = c.req.param('id')
+  const existing = await db.smtpAccount.findUnique({ where: { id } })
+  if (!existing || existing.ownerId !== userId) return c.json({ error: 'Not found' }, 404)
   const account = await db.smtpAccount.update({
-    where: { id: c.req.param('id') },
+    where: { id },
     data: { status: 'paused' },
   })
   return c.json({ account: { ...account, smtpPassEnc: undefined, imapPassEnc: undefined } })
 })
 
-// POST /api/accounts/:id/resume — resume sending
+// POST /api/accounts/:id/resume
 app.post('/:id/resume', async (c) => {
+  const userId = getUserId(c)
+  const id = c.req.param('id')
+  const existing = await db.smtpAccount.findUnique({ where: { id } })
+  if (!existing || existing.ownerId !== userId) return c.json({ error: 'Not found' }, 404)
   const account = await db.smtpAccount.update({
-    where: { id: c.req.param('id') },
+    where: { id },
     data: { status: 'active', failureStreak: 0 },
   })
   return c.json({ account: { ...account, smtpPassEnc: undefined, imapPassEnc: undefined } })

@@ -78,10 +78,12 @@ interface Notification {
 }
 
 interface WebhookConfig {
+  id: string
   url: string
   type: 'slack' | 'discord' | 'generic'
   enabled: boolean
   events: string[] // which event types to forward (empty = all)
+  label?: string
 }
 
 let notifCache: Notification[] | null = null

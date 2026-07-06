@@ -10,6 +10,7 @@ import warmupRoutes from './routes/warmup'
 import uniboxRoutes from './routes/unibox'
 import extrasRoutes from './routes/extras'
 import exportsRoutes from './routes/exports'
+import verifyRoutes from './routes/verify'
 
 // ─── Process-level crash protection ───
 process.on('uncaughtException', (err) => {
@@ -34,8 +35,6 @@ app.use('*', cors({
 }))
 
 // ─── Request logger ───────────────────────────────────────────────────────
-// Logs mutating requests (POST/PUT/DELETE) so they appear in Render logs.
-// GETs are skipped to avoid noise (health pings every 15 min, polling, etc).
 app.use('*', async (c, next) => {
   await next()
   const method = c.req.method
@@ -43,7 +42,6 @@ app.use('*', async (c, next) => {
   const path = c.req.path
   const status = c.res.status
   const ts = new Date().toISOString()
-  // Skip health-check noise; surface everything else
   if (path === '/api/health') return
   console.log(`[${ts}] ${method} ${path} → ${status}`)
 })
@@ -51,9 +49,8 @@ app.use('*', async (c, next) => {
 // Health check (public)
 app.get('/api/health', (c) => c.json({ ok: true, service: 'lead-dispatcher-backend', ts: Date.now() }))
 
-// Public cron endpoint — called by Cloud Scheduler every 5 minutes
-// Protected by a secret in the URL path (CRON_SECRET env var)
-// This replaces the need for a separate Cloud Run Job + CLI setup
+// Public cron endpoint — called by Cloud Scheduler every 5 minutes.
+// Protected by a secret in the URL path (CRON_SECRET env var).
 app.all('/api/cron/:secret', async (c) => {
   const secret = c.req.param('secret')
   const expectedSecret = process.env.CRON_SECRET
@@ -64,11 +61,13 @@ app.all('/api/cron/:secret', async (c) => {
     const { processSendBatch } = await import('./modules/dispatcher')
     const { processWarmupBatch, processWarmupInbound } = await import('./modules/warmup')
     const { processInboundReplies } = await import('./modules/unibox')
+    const { processVerificationBatch } = await import('./routes/verify')
 
     const sendResult = await processSendBatch(3).catch((e: any) => ({ error: e?.message }))
     const warmupResult = await processWarmupBatch(15).catch((e: any) => ({ error: e?.message }))
     const warmupInboundResult = await processWarmupInbound().catch((e: any) => ({ error: e?.message }))
     const replyResult = await processInboundReplies().catch((e: any) => ({ error: e?.message }))
+    const verifyResult = await processVerificationBatch().catch((e: any) => ({ error: e?.message }))
 
     return c.json({
       ok: true,
@@ -78,6 +77,7 @@ app.all('/api/cron/:secret', async (c) => {
         warmup: warmupResult,
         warmupInbound: warmupInboundResult,
         replies: replyResult,
+        verification: verifyResult,
       },
     })
   } catch (e: any) {
@@ -89,13 +89,48 @@ app.all('/api/cron/:secret', async (c) => {
 // Public auth routes (login, register) — no token required
 app.route('/api/auth', authRoutes)
 
+// ─── URL validation helper for click tracking ───────────────────────────────
+// Blocks open-redirect / phishing vectors. Only allows http/https absolute
+// URLs. Optionally restricts to the campaign's allowedClickDomains if the
+// tracked ScheduledEmail's campaign has that field set.
+function isSafeRedirectUrl(rawUrl: string): boolean {
+  if (!rawUrl || typeof rawUrl !== 'string') return false
+  // Reject obviously dangerous schemes
+  if (/^(data:|javascript:|file:|vbscript:|about:|blob:|chrome:|chrome-extension:)/i.test(rawUrl)) {
+    return false
+  }
+  let parsed: URL
+  try {
+    parsed = new URL(rawUrl)
+  } catch {
+    return false
+  }
+  // Must be http or https
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
+  // Must have a hostname (no protocol-relative URLs)
+  if (!parsed.hostname) return false
+  // Reject localhost / private IPs / metadata endpoints (SSRF + phishing)
+  const host = parsed.hostname.toLowerCase()
+  if (
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '0.0.0.0' ||
+    host.endsWith('.local') ||
+    /^10\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    host === '169.254.169.254' || // cloud metadata
+    host.endsWith('.metadata.google.internal')
+  ) {
+    return false
+  }
+  return true
+}
+
 // Public tracking routes (email clients fetch these — no auth)
-// GET /api/extras/t/o/:trackingId — open tracking pixel (1x1 GIF)
-// GET /api/extras/t/c/:trackingId?url=... — click redirect
+// GET /api/extras/t/o/:trackingId — open-tracking pixel
+// GET /api/extras/t/c/:trackingId?url=... — click redirect (validated URL only)
 app.get('/api/extras/t/o/:trackingId', async (c) => {
-  const { default: exportsRoutes } = await import('./routes/exports')
-  // Delegate to the exports route handler — but it's defined as a sub-app.
-  // Simpler: handle inline here.
   const { db } = await import('./lib/db')
   const trackingId = c.req.param('trackingId')
   try {
@@ -122,14 +157,36 @@ app.get('/api/extras/t/o/:trackingId', async (c) => {
     },
   })
 })
+
 app.get('/api/extras/t/c/:trackingId', async (c) => {
   const { db } = await import('./lib/db')
   const trackingId = c.req.param('trackingId')
   const url = c.req.query('url')
   if (!url) return c.json({ error: 'url query param required' }, 400)
+
+  // ─── Open-redirect defense ───
+  // Only allow http/https absolute URLs. Block data:, javascript:, file:,
+  // etc. Optionally restrict to campaign's allowedClickDomains if set.
+  if (!isSafeRedirectUrl(url)) {
+    return c.json({ error: 'Invalid or unsafe redirect URL' }, 400)
+  }
+
   try {
-    const email = await db.scheduledEmail.findUnique({ where: { trackingId } })
+    const email = await db.scheduledEmail.findUnique({
+      where: { trackingId },
+      include: { campaign: { select: { allowedClickDomains: true } } },
+    })
     if (email) {
+      // Optional: per-campaign allowlist
+      const allow = email.campaign?.allowedClickDomains
+      if (allow) {
+        const allowed = allow.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+        const targetHost = new URL(url).hostname.toLowerCase()
+        const matchesAllow = allowed.some((d) => targetHost === d || targetHost.endsWith('.' + d))
+        if (!matchesAllow) {
+          return c.json({ error: 'URL not in campaign allowlist' }, 400)
+        }
+      }
       await db.scheduledEmail.update({
         where: { id: email.id },
         data: {
@@ -141,12 +198,10 @@ app.get('/api/extras/t/c/:trackingId', async (c) => {
   } catch (e: any) {
     console.error('[tracking] click error:', e?.message)
   }
-  return c.redirect(url)
+  return c.redirect(url, 302)
 })
 
 // Public unsubscribe routes (lead clicks link in email — no auth)
-// GET /api/extras/unsubscribe/:leadId — check if lead exists (for landing page)
-// POST /api/extras/unsubscribe/:leadId — actually unsubscribe
 app.get('/api/extras/unsubscribe/:leadId', async (c) => {
   const { db } = await import('./lib/db')
   const leadId = c.req.param('leadId')
@@ -169,13 +224,13 @@ app.post('/api/extras/unsubscribe/:leadId', async (c) => {
   const leadId = c.req.param('leadId')
   const lead = await db.lead.findUnique({
     where: { id: leadId },
-    select: { id: true, email: true, campaignId: true, campaign: { select: { name: true } } },
+    select: { id: true, email: true, ownerId: true, campaignId: true, campaign: { select: { name: true } } },
   })
   if (!lead) return c.json({ error: 'Invalid unsubscribe link' }, 404)
   if (lead.email) {
     await db.suppressionList.upsert({
       where: { email_reason: { email: lead.email.toLowerCase(), reason: 'unsubscribe' } },
-      create: { email: lead.email.toLowerCase(), reason: 'unsubscribe', source: lead.campaign?.name || 'unsubscribe-link' },
+      create: { ownerId: lead.ownerId, email: lead.email.toLowerCase(), reason: 'unsubscribe', source: lead.campaign?.name || 'unsubscribe-link' },
       update: {},
     })
   }
@@ -195,13 +250,22 @@ protectedApi.route('/warmup', warmupRoutes)
 protectedApi.route('/unibox', uniboxRoutes)
 protectedApi.route('/extras', extrasRoutes)
 protectedApi.route('/exports', exportsRoutes)
+protectedApi.route('/verify', verifyRoutes)
 app.route('/api', protectedApi)
 
 // 404
 app.notFound((c) => c.json({ error: 'Not found' }, 404))
+
+// ─── Error handler ───
+// In production, strip internal error detail to avoid leaking stack traces
+// and implementation hints to attackers. In dev, keep the detail for
+// debugging. Always log the full error server-side.
 app.onError((err, c) => {
   console.error('[backend] Unhandled error:', err)
-  return c.json({ error: 'Internal server error', detail: err.message }, 500)
+  if (process.env.NODE_ENV === 'production') {
+    return c.json({ error: 'Internal server error' }, 500)
+  }
+  return c.json({ error: 'Internal server error', detail: err?.message || String(err) }, 500)
 })
 
 export default app

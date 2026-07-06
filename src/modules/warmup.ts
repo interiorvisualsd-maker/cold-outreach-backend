@@ -1,6 +1,6 @@
 import { db } from '../lib/db'
 import { sendMail } from '../lib/smtp'
-import { fetchUnreadMessages, rescueFromSpam, markMessageRead, getImapClient } from '../lib/imap'
+import { fetchUnreadMessages, rescueFromSpam, markMessageRead } from '../lib/imap'
 import type { SmtpAccount } from '@prisma/client'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -63,7 +63,6 @@ export async function scheduleWarmupMessages(): Promise<{ scheduled: number }> {
   let scheduled = 0
 
   for (const account of accounts) {
-    // Calculate today's target based on ramp-up
     const day = account.warmupDay + 1
     const target = Math.min(
       account.warmupStartQty + (day - 1) * account.warmupIncrement,
@@ -73,12 +72,10 @@ export async function scheduleWarmupMessages(): Promise<{ scheduled: number }> {
     if (remaining <= 0) continue
 
     for (let i = 0; i < remaining; i++) {
-      // Pick a different account to send TO
       const others = accounts.filter((a) => a.id !== account.id)
       if (others.length === 0) break
       const toAccount = randomItem(others)
 
-      // 30% chance to continue an existing thread (if any)
       const existingThread = await db.warmupMessage.findFirst({
         where: {
           fromAccountId: account.id,
@@ -95,7 +92,6 @@ export async function scheduleWarmupMessages(): Promise<{ scheduled: number }> {
         : randomItem(WARMUP_SUBJECTS)
       const body = randomItem(WARMUP_BODIES)
 
-      // Stagger send times across the day with jitter
       const hourOfDay = Math.floor(Math.random() * 12) + 7 // 7 AM - 7 PM
       const scheduledAt = new Date(now)
       scheduledAt.setHours(hourOfDay, Math.floor(Math.random() * 60), 0, 0)
@@ -122,7 +118,14 @@ export async function scheduleWarmupMessages(): Promise<{ scheduled: number }> {
 // ─────────────────────────────────────────────────────────────────────────────
 // WARM-UP SENDER — send due warm-up messages
 // ─────────────────────────────────────────────────────────────────────────────
-
+//
+// IMPORTANT: warmup emails DO count against the sending account's dailyCap.
+// This is intentional — warmup is real email volume that consumes reputation,
+// and lumping it under the same cap prevents the account from exceeding the
+// provider's actual daily limit (Gmail 500, Outlook 300, etc.). If you're
+// tempted to "fix" this by removing the increment below, DON'T — you'll
+// cause the account to exceed provider limits and get rate-limited or banned.
+// (See audit finding: warmup bypasses dailyCap → reputation risk.)
 export async function processWarmupBatch(batchSize = 20): Promise<{
   processed: number
   sent: number
@@ -144,8 +147,21 @@ export async function processWarmupBatch(batchSize = 20): Promise<{
     const fromAccount = await db.smtpAccount.findUnique({ where: { id: msg.fromAccountId } })
     const toAccount = await db.smtpAccount.findUnique({ where: { id: msg.toAccountId } })
     if (!fromAccount || !toAccount) {
-      await db.warmupMessage.update({ where: { id: msg.id }, data: { status: 'failed' } })
+      await db.warmupMessage.update({ where: { id: msg.id }, data: { status: 'failed', lastError: 'Account missing' } })
       failed++
+      continue
+    }
+
+    // Check daily cap BEFORE sending — warmup counts against it.
+    if (fromAccount.sentToday + fromAccount.warmupSentToday >= fromAccount.dailyCap) {
+      // Reschedule for tomorrow morning rather than failing
+      const tomorrow = new Date(now)
+      tomorrow.setDate(tomorrow.getDate() + 1)
+      tomorrow.setHours(8, Math.floor(Math.random() * 120), 0, 0)
+      await db.warmupMessage.update({
+        where: { id: msg.id },
+        data: { scheduledAt: tomorrow },
+      })
       continue
     }
 
@@ -157,26 +173,38 @@ export async function processWarmupBatch(batchSize = 20): Promise<{
         fromName: fromAccount.fromName,
       })
 
-      await db.warmupMessage.update({
-        where: { id: msg.id },
-        data: { status: 'sent', sentAt: now },
-      })
-      await db.smtpAccount.update({
-        where: { id: fromAccount.id },
-        data: { warmupSentToday: { increment: 1 }, lastSentAt: now, failureStreak: 0 },
-      })
-      await db.emailLog.create({
-        data: {
-          direction: 'outbound',
-          smtpAccountId: fromAccount.id,
-          toEmail: toAccount.emailAddress,
-          fromEmail: fromAccount.emailAddress,
-          subject: msg.subject,
-          body: msg.body,
-          messageId,
-          isWarmup: true,
-          sentAt: now,
-        },
+      // ─── Transaction: warmup update + account counter + email log ───
+      await db.$transaction(async (tx) => {
+        await tx.warmupMessage.update({
+          where: { id: msg.id },
+          data: { status: 'sent', sentAt: now },
+        })
+        // IMPORTANT: warmup emails count against sentToday (the dailyCap field).
+        // We also still increment warmupSentToday for visibility/reporting.
+        // See comment above processWarmupBatch for rationale.
+        await tx.smtpAccount.update({
+          where: { id: fromAccount.id },
+          data: {
+            sentToday: { increment: 1 },
+            warmupSentToday: { increment: 1 },
+            lastSentAt: now,
+            failureStreak: 0,
+          },
+        })
+        await tx.emailLog.create({
+          data: {
+            ownerId: fromAccount.ownerId,
+            direction: 'outbound',
+            smtpAccountId: fromAccount.id,
+            toEmail: toAccount.emailAddress,
+            fromEmail: fromAccount.emailAddress,
+            subject: msg.subject,
+            body: msg.body,
+            messageId,
+            isWarmup: true,
+            sentAt: now,
+          },
+        })
       })
       sent++
     } catch (e: any) {
@@ -186,7 +214,6 @@ export async function processWarmupBatch(batchSize = 20): Promise<{
         where: { id: msg.id },
         data: { status: 'failed', lastError: e?.message },
       })
-      // Bump failure streak — dispatcher's auto-pause handles 3 strikes
       await db.smtpAccount.update({
         where: { id: fromAccount.id },
         data: { failureStreak: { increment: 1 } },
@@ -213,12 +240,10 @@ export async function processWarmupInbound(): Promise<{
   let rescued = 0
   let replied = 0
 
-  // Get all accounts that should receive warm-up emails
   const accounts = await db.smtpAccount.findMany({
     where: { warmupEnabled: true, status: { not: 'suspended' } },
   })
 
-  // Only check messages from the last 24h
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000)
 
   for (const account of accounts) {
@@ -226,7 +251,6 @@ export async function processWarmupInbound(): Promise<{
       const messages = await fetchUnreadMessages(account, since, 30)
       checked += messages.length
 
-      // Filter: only process messages from our other warm-up accounts
       const peerEmails = accounts
         .filter((a) => a.id !== account.id)
         .map((a) => a.emailAddress.toLowerCase())
@@ -236,7 +260,6 @@ export async function processWarmupInbound(): Promise<{
         const fromEmail = msg.from.toLowerCase()
         if (!peerSet.has(fromEmail)) continue // not a warm-up message
 
-        // Find the corresponding WarmupMessage record by sender + subject + recent timeframe
         const senderAccount = accounts.find((a) => a.emailAddress.toLowerCase() === fromEmail)
         if (!senderAccount) continue
 
@@ -252,7 +275,6 @@ export async function processWarmupInbound(): Promise<{
         })
         if (!warmupMsg) continue
 
-        // If in spam folder, rescue it
         const wasInSpam = msg.folder.toLowerCase().includes('spam') ||
           msg.folder.toLowerCase().includes('junk') ||
           msg.folder.toLowerCase().includes('bulk')
@@ -260,7 +282,6 @@ export async function processWarmupInbound(): Promise<{
           const ok = await rescueFromSpam(account, msg.folder, msg.uid)
           if (ok) rescued++
         } else {
-          // Already in inbox — just mark important + read
           await markMessageRead(account, msg.folder, msg.uid)
         }
 
@@ -285,24 +306,39 @@ export async function processWarmupInbound(): Promise<{
               fromName: account.fromName,
               inReplyTo: msg.messageId,
             })
-            await db.warmupMessage.update({
-              where: { id: warmupMsg.id },
-              data: { status: 'replied', repliedAt: new Date() },
-            })
-            await db.emailLog.create({
-              data: {
-                direction: 'outbound',
-                smtpAccountId: account.id,
-                toEmail: senderAccount.emailAddress,
-                fromEmail: account.emailAddress,
-                subject: replySubject,
-                body: replyBody,
-                messageId,
-                inReplyTo: msg.messageId,
-                isWarmup: true,
-                isReply: true,
-                sentAt: new Date(),
-              },
+
+            // ─── Transaction: warmup update + account counter + email log ───
+            await db.$transaction(async (tx) => {
+              await tx.warmupMessage.update({
+                where: { id: warmupMsg.id },
+                data: { status: 'replied', repliedAt: new Date() },
+              })
+              // Auto-reply warmup emails ALSO count against dailyCap.
+              await tx.smtpAccount.update({
+                where: { id: account.id },
+                data: {
+                  sentToday: { increment: 1 },
+                  warmupSentToday: { increment: 1 },
+                  lastSentAt: new Date(),
+                  failureStreak: 0,
+                },
+              })
+              await tx.emailLog.create({
+                data: {
+                  ownerId: account.ownerId,
+                  direction: 'outbound',
+                  smtpAccountId: account.id,
+                  toEmail: senderAccount.emailAddress,
+                  fromEmail: account.emailAddress,
+                  subject: replySubject,
+                  body: replyBody,
+                  messageId,
+                  inReplyTo: msg.messageId,
+                  isWarmup: true,
+                  isReply: true,
+                  sentAt: new Date(),
+                },
+              })
             })
             replied++
           } catch (e: any) {

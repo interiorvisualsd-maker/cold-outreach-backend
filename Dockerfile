@@ -25,5 +25,6 @@ RUN chmod +x start.sh
 # server.ts reads from process.env.PORT, so this works everywhere.
 EXPOSE 8080
 
-# Run startup script: creates database tables, then starts server
+# Run startup script: applies prisma migrations, then starts server.
+# Uses `prisma migrate deploy` (NOT `db push`) — see start.sh.
 CMD ["./start.sh"]

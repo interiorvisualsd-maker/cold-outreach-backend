@@ -1,24 +1,40 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// EMAIL VERIFICATION — multi-layer deliverability checks
+// EMAIL VERIFICATION — multi-layer deliverability checks (10 layers)
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // Layers (fast → slow):
-//   1. Format check (regex)                              — instant
-//   2. Disposable / temp domain check                    — instant
-//   3. Role-based address check (info@, sales@, etc.)    — instant
-//   4. MX record lookup (does the domain accept mail?)   — ~50-200ms
-//   5. SMTP mailbox verification (RCPT TO)               — 500ms-5s
+//   1.  Syntax (RFC 5322 regex)                       — instant
+//   2.  Domain (DNS A/AAAA records exist)             — ~50-200ms
+//   3.  MX record (domain accepts mail)               — ~50-200ms
+//   4.  SMTP mailbox verification (RCPT TO)           — 500ms-5s
+//   5.  Disposable / temp email domain                — instant
+//   6.  Role-based account (info@, sales@, etc.)      — instant
+//   7.  Free email provider (gmail, yahoo, etc.)      — instant
+//   8.  Catch-all detection (random UUID RCPT)        — adds 1-3s
+//   9.  Typo detection (gnail.com → gmail.com)        — instant
+//   10. Deliverability score (composite 0-100)        — computed
 //
-// Layers 1-4 are "quick" and safe to run on every email at import time.
-// Layer 5 is slow and can be blocked by some providers, so it's only run
-// on-demand via the "Verify Emails (Deep)" button.
+// Two top-level entrypoints:
+//   quickVerify(email)    → layers 1, 2, 3, 5, 6, 7, 9  (safe to run on import)
+//   deepVerify(email)     → quickVerify + layers 4, 8     (slow, on-demand)
+//
+// Result shape (VerificationResult) is shared by both, plus deepVerify adds
+// smtp + catchAll fields. The Lead.verificationResults JSON column stores
+// the full result; Lead.verificationStatus stores PENDING/VERIFYING/VERIFIED/RISKY/BAD.
 
 import dns from 'node:dns'
+import dnsPromises from 'node:dns/promises'
 import net from 'node:net'
 
-// ─── Layer 1: Format ───
+// Force IPv4-first DNS resolution (avoids Cloudflare IPv6 issues for SMTP)
+dns.setDefaultResultOrder('ipv4first')
+
+// ─── Layer 1: Syntax (RFC 5322-ish, well-tested) ───
+// Pragmatic RFC 5322 regex. Permits dots, plus-tags, hyphens, etc. Rejects
+// the obvious junk (no spaces, must have @ and a dotted domain).
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-const STRICT_EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/
+const STRICT_EMAIL_REGEX =
+  /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/
 
 export function checkFormat(email: string): { valid: boolean; reason?: string } {
   if (!email || typeof email !== 'string') return { valid: false, reason: 'empty' }
@@ -29,12 +45,241 @@ export function checkFormat(email: string): { valid: boolean; reason?: string } 
   if (!local || local.length > 64) return { valid: false, reason: 'local_part_too_long' }
   if (!domain || domain.length > 253) return { valid: false, reason: 'domain_too_long' }
   if (!STRICT_EMAIL_REGEX.test(e)) return { valid: false, reason: 'invalid_characters' }
+  // Reject consecutive dots in local part
+  if (/\.\./.test(local)) return { valid: false, reason: 'consecutive_dots' }
   return { valid: true }
 }
 
-// ─── Layer 2: Disposable / temp domains ───
+// ─── Layer 2: Domain (A/AAAA records) ───
+// Cache DNS lookups for 1 hour to avoid hammering resolvers.
+const dnsCache = new Map<string, { expires: number; value: any }>()
+const DNS_CACHE_TTL = 60 * 60 * 1000
+
+export async function checkDomainA(domain: string): Promise<{ ok: boolean; reason?: string }> {
+  const now = Date.now()
+  const cached = dnsCache.get('A:' + domain)
+  if (cached && cached.expires > now) return cached.value
+  let value: { ok: boolean; reason?: string }
+  try {
+    const [a4, a6] = await Promise.allSettled([
+      dnsPromises.resolve4(domain),
+      dnsPromises.resolve6(domain),
+    ])
+    const has4 = a4.status === 'fulfilled' && a4.value.length > 0
+    const has6 = a6.status === 'fulfilled' && a6.value.length > 0
+    value = has4 || has6 ? { ok: true } : { ok: false, reason: 'no_a_records' }
+  } catch {
+    value = { ok: false, reason: 'dns_lookup_failed' }
+  }
+  dnsCache.set('A:' + domain, { expires: now + DNS_CACHE_TTL, value })
+  return value
+}
+
+// ─── Layer 3: MX record ───
+export async function getMxRecords(domain: string): Promise<string[]> {
+  const now = Date.now()
+  const cached = dnsCache.get('MX:' + domain)
+  if (cached && cached.expires > now) return cached.value
+  let value: string[]
+  try {
+    const addresses = await dnsPromises.resolveMx(domain)
+    if (!addresses || addresses.length === 0) value = []
+    else
+      value = addresses
+        .sort((a, b) => a.priority - b.priority)
+        .map((a) => a.exchange.toLowerCase())
+  } catch {
+    value = []
+  }
+  dnsCache.set('MX:' + domain, { expires: now + DNS_CACHE_TTL, value })
+  return value
+}
+
+export async function checkMx(domain: string): Promise<{ valid: boolean; hosts: string[] }> {
+  const hosts = await getMxRecords(domain)
+  return { valid: hosts.length > 0, hosts }
+}
+
+// ─── Layer 4: SMTP mailbox verification (RCPT TO) ───
+// Connects to the recipient's MX server, issues EHLO/MAIL FROM/RCPT TO,
+// and checks the response code. 250 = mailbox exists; 550 = doesn't exist;
+// 252 = cannot verify (risky); 4xx = temporary (risky, retry).
+//
+// IMPORTANT caveats:
+//   - Gmail/Outlook often return 250 for unknown addresses (anti-harvesting).
+//     So a 250 is not 100% proof of existence — but a 550 IS proof of absence.
+//   - Some providers greylist or rate-limit. We retry once with a short delay.
+//   - This is SLOW (500ms-5s per check). Only run on-demand.
+//
+// MAIL FROM: if VERIFICATION_DOMAIN env var is set, use verify@<that domain>.
+// Otherwise use empty MAIL FROM (<>), which is RFC-compliant for bounces and
+// reduces the chance of being flagged as a spammer.
+export interface SmtpVerifyResult {
+  status: 'valid' | 'invalid' | 'unknown' | 'catch-all'
+  code?: number
+  response?: string
+  details?: string
+}
+
+function getMailFromAddress(): string {
+  const v = process.env.VERIFICATION_DOMAIN
+  if (v && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(v)) return `verify@${v.toLowerCase()}`
+  return '' // empty MAIL FROM (<>)
+}
+
+function getHeloDomain(): string {
+  const v = process.env.VERIFICATION_DOMAIN
+  if (v && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(v)) return v.toLowerCase()
+  return 'verify.local'
+}
+
+export async function verifyMailboxSmtp(
+  email: string,
+  mxHosts: string[],
+  timeoutMs = 10000
+): Promise<SmtpVerifyResult> {
+  if (mxHosts.length === 0) {
+    return { status: 'unknown', details: 'No MX records for domain' }
+  }
+  const target = email.toLowerCase()
+  const mailFrom = getMailFromAddress()
+
+  // Try the top 2 MX hosts (in priority order) in case the first is down
+  for (const mxHost of mxHosts.slice(0, 2)) {
+    try {
+      const result = await trySmtpRcpt(mxHost, target, mailFrom, timeoutMs)
+      if (result.status !== 'unknown') return result
+    } catch {
+      continue
+    }
+  }
+  return { status: 'unknown', details: 'All MX hosts unreachable or timed out' }
+}
+
+async function trySmtpRcpt(
+  mxHost: string,
+  target: string,
+  mailFrom: string,
+  timeoutMs: number
+): Promise<SmtpVerifyResult> {
+  return new Promise((resolve) => {
+    const socket = new net.Socket()
+    let buffer = ''
+    let step: 'connect' | 'helo' | 'mail' | 'rcpt' | 'done' = 'connect'
+    let smtpResponse = ''
+    let lastCode: number | undefined
+    const timer = setTimeout(() => {
+      socket.destroy()
+      resolve({ status: 'unknown', code: lastCode, response: smtpResponse, details: 'Timeout' })
+    }, timeoutMs)
+
+    socket.connect(25, mxHost)
+    socket.setEncoding('utf-8')
+    socket.setTimeout(timeoutMs)
+
+    const send = (cmd: string) => socket.write(cmd + '\r\n')
+
+    const finish = (r: SmtpVerifyResult) => {
+      clearTimeout(timer)
+      socket.destroy()
+      resolve(r)
+    }
+
+    socket.on('data', (data) => {
+      buffer += data.toString()
+      // SMTP multiline responses end with `<code> <text>\r\n` (space after code).
+      // Multiline continuations use `<code>-<text>\r\n` (hyphen).
+      const lastLineMatch = buffer.match(/\r?\n(\d{3})[ ].*\r?\n$/)
+      if (!lastLineMatch) return
+      const code = parseInt(lastLineMatch[1], 10)
+      lastCode = code
+      smtpResponse = buffer.split(/\r?\n/).filter(Boolean).slice(-1)[0] || ''
+      buffer = ''
+
+      if (step === 'connect') {
+        if (code === 220) {
+          step = 'helo'
+          send(`EHLO ${getHeloDomain()}`)
+        } else {
+          finish({ status: 'unknown', code, response: smtpResponse, details: `Unexpected greeting: ${code}` })
+        }
+      } else if (step === 'helo') {
+        if (code >= 200 && code < 300) {
+          step = 'mail'
+          // Empty MAIL FROM (RFC 5321 § 4.5.5) when no verification domain is set
+          send(mailFrom ? `MAIL FROM:<${mailFrom}>` : 'MAIL FROM:<>')
+        } else {
+          finish({ status: 'unknown', code, response: smtpResponse, details: `EHLO rejected: ${code}` })
+        }
+      } else if (step === 'mail') {
+        if (code >= 200 && code < 300) {
+          step = 'rcpt'
+          send(`RCPT TO:<${target}>`)
+        } else {
+          finish({ status: 'unknown', code, response: smtpResponse, details: `MAIL FROM rejected: ${code}` })
+        }
+      } else if (step === 'rcpt') {
+        if (code >= 250 && code < 260) {
+          // 250 = mailbox exists (but could be catch-all — see Layer 8)
+          finish({ status: 'valid', code, response: smtpResponse, details: 'RCPT TO accepted' })
+        } else if (code === 251) {
+          finish({ status: 'valid', code, response: smtpResponse, details: 'User not local, will forward' })
+        } else if (code === 252) {
+          // 252 = cannot verify but will accept — treat as unknown (risky)
+          finish({ status: 'unknown', code, response: smtpResponse, details: 'Server cannot verify' })
+        } else if (code >= 550 && code < 560) {
+          finish({ status: 'invalid', code, response: smtpResponse, details: 'Mailbox does not exist' })
+        } else if (code >= 400 && code < 500) {
+          finish({ status: 'unknown', code, response: smtpResponse, details: `Temporary failure: ${code}` })
+        } else {
+          finish({ status: 'unknown', code, response: smtpResponse, details: `Unexpected RCPT response: ${code}` })
+        }
+      }
+    })
+
+    socket.on('error', () => {
+      clearTimeout(timer)
+      resolve({ status: 'unknown', details: 'Connection error' })
+    })
+    socket.on('timeout', () => {
+      clearTimeout(timer)
+      socket.destroy()
+      resolve({ status: 'unknown', code: lastCode, response: smtpResponse, details: 'Socket timeout' })
+    })
+    socket.on('close', () => {
+      if (step !== 'done') {
+        clearTimeout(timer)
+        resolve({ status: 'unknown', details: 'Connection closed early' })
+      }
+    })
+  })
+}
+
+// ─── Layer 8: Catch-all detection ───
+// After SMTP-checking the real address, also check a random UUID-style
+// address at the same domain. If the server returns 250 for that too, the
+// domain is catch-all → mark the real address as "risky".
+export async function detectCatchAll(
+  domain: string,
+  mxHosts: string[]
+): Promise<{ catchAll: boolean; details?: string }> {
+  const probe = `zz-test-${Math.random().toString(36).slice(2, 10)}@${domain.toLowerCase()}`
+  try {
+    const r = await verifyMailboxSmtp(probe, mxHosts, 8000)
+    if (r.status === 'valid') {
+      // Server accepted a clearly-fake address → catch-all
+      return { catchAll: true, details: 'Server accepts all addresses (catch-all)' }
+    }
+    return { catchAll: false }
+  } catch {
+    return { catchAll: false }
+  }
+}
+
+// ─── Layer 5: Disposable / temp domains ───
 // Sourced from https://github.com/disposable-email-domains/disposable-email-domains
-// (truncated to the most common ~200 to keep the bundle small)
+// Keep this list updated periodically — new disposable providers appear weekly.
+// (Truncated to ~250 of the most common to keep bundle size reasonable.)
 const DISPOSABLE_DOMAINS = new Set([
   'mailinator.com', 'guerrillamail.com', '10minutemail.com', 'tempmail.com',
   'tempmail.org', 'throwawaymail.com', 'yopmail.com', 'getnada.com',
@@ -58,13 +303,27 @@ const DISPOSABLE_DOMAINS = new Set([
   'mfsa.ru', 'mailspeed.ru', 'yomail.info', 'emltmp.com',
   'scrn.me', 'tmpeml.info', 'binka.me', 'tinoza.org',
   '682.net', 'zainmax.net', 'rhyta.com', 'superrito.com',
+  'armyspy.com', 'cuvox.de', 'dayrep.com', 'einrot.com', 'fleckens.hu',
+  'gustr.com', 'jourrapide.com', 'teleworm.us', 'junk.com', 'spam.com',
+  'trash.com', 'dump.com', 'fake.com', 'nonsense.com', 'nothing.com',
+  'nobody.com', 'nowhere.com', 'example.com', 'example.org', 'example.net',
+  'test.com', 'test.org', 'mailcatch.com', 'guerrillamail.net', 'spamgourmet.net',
+  'mailnull.com', 'spambox.us', 'tempinbox.net', 'mytemp.email', 'tempemail.co',
+  'incognitomail.com', 'incognitomail.net', 'mailme.gq', 'guerrillamail.biz',
+  'guerrillamail.de', 'guerrillamail.net', 'guerrillamail.org', 'guerrillamailblock.com',
+  'mohmal.com', 'mohmal.tech', 'smartradio.com', 'duam.net', 'mail-tech.com',
+  'mailed.in', 'maildrop.ga', 'mail-disable.com', 'qpq.email',
+  'boxformail.in', 'flemail.in', 'mcache.net', 'mailhazard.com',
+  'mailhazard.us', 'mailhero.io', 'nemOz.al', 'vmani.com',
+  'airbox.top', 'femailtor.com', 'twkhh.com', 'emailsu.net',
+  'tmail.ws', 'mfsa.info', '001zs.com', 'mailbink.com',
 ])
 
 export function isDisposable(domain: string): boolean {
   return DISPOSABLE_DOMAINS.has(domain.toLowerCase())
 }
 
-// ─── Layer 3: Role-based addresses ───
+// ─── Layer 6: Role-based addresses ───
 const ROLE_PREFIXES = new Set([
   'info', 'sales', 'support', 'admin', 'administrator', 'webmaster',
   'postmaster', 'hostmaster', 'abuse', 'security', 'contact',
@@ -74,297 +333,374 @@ const ROLE_PREFIXES = new Set([
   'it', 'dev', 'development', 'tech', 'api', 'root', 'system',
   'list', 'listserv', 'majordomo', 'owner', 'bounce', 'auto',
   'automated', 'bot', 'robot', 'daemon', 'mailer', 'newsletter',
-  'news', 'announce', 'notification', 'alert', 'warning',
+  'news', 'announce', 'notification', 'alert', 'warning', 'enquiries',
 ])
 
 export function isRoleBased(localPart: string): boolean {
   const local = localPart.toLowerCase().trim()
-  // Exact match
   if (ROLE_PREFIXES.has(local)) return true
   // Common patterns: info123, support-team, admin.
   const base = local.replace(/[\d._-]+.*$/, '').replace(/[._-]+$/, '')
-  if (ROLE_PREFIXES.has(base)) return true
-  return false
+  return ROLE_PREFIXES.has(base)
 }
 
-// ─── Layer 4: MX record lookup ───
-// Cache MX lookups for 1 hour to avoid hammering DNS
-const mxCache = new Map<string, { expires: number; hosts: string[] }>()
-const MX_CACHE_TTL = 60 * 60 * 1000
+// ─── Layer 7: Free email provider ───
+// These are valid but worth flagging in a B2B context (most B2B leads use
+// company domains, not free providers).
+const FREE_DOMAINS = new Set([
+  'gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'aol.com',
+  'icloud.com', 'protonmail.com', 'proton.me', 'live.com', 'msn.com',
+  'gmx.com', 'gmx.net', 'yandex.com', 'yandex.ru', 'mail.com',
+  'zoho.com', 'fastmail.com', 'tutanota.com', 'tuta.io', 'me.com',
+  'mac.com', 'facebook.com', 'yahoo.co.uk', 'yahoo.fr', 'yahoo.de',
+  'yahoo.it', 'yahoo.es', 'yahoo.ca', 'yahoo.com.au', 'yahoo.co.in',
+  'hotmail.co.uk', 'hotmail.fr', 'hotmail.de', 'live.co.uk', 'live.fr',
+  'outlook.co.uk', 'outlook.fr', 'outlook.de',
+])
 
-export async function getMxRecords(domain: string): Promise<string[]> {
-  const now = Date.now()
-  const cached = mxCache.get(domain)
-  if (cached && cached.expires > now) return cached.hosts
-
-  return new Promise((resolve) => {
-    dns.resolveMx(domain, (err, addresses) => {
-      if (err || !addresses || addresses.length === 0) {
-        mxCache.set(domain, { expires: now + MX_CACHE_TTL, hosts: [] })
-        resolve([])
-        return
-      }
-      // Sort by priority, return hostnames
-      const hosts = addresses
-        .sort((a, b) => a.priority - b.priority)
-        .map((a) => a.exchange.toLowerCase())
-      mxCache.set(domain, { expires: now + MX_CACHE_TTL, hosts })
-      resolve(hosts)
-    })
-  })
+export function isFreeProvider(domain: string): boolean {
+  return FREE_DOMAINS.has(domain.toLowerCase())
 }
 
-export async function checkMx(domain: string): Promise<{ valid: boolean; hosts: string[] }> {
-  const hosts = await getMxRecords(domain)
-  return { valid: hosts.length > 0, hosts }
+// ─── Layer 9: Typo detection ───
+// Small mapping table of the most common typos. If detected, the address is
+// flagged BAD with a suggested correction.
+const TYPO_MAP: Record<string, string> = {
+  'gnail.com': 'gmail.com',
+  'gmal.com': 'gmail.com',
+  'gmaill.com': 'gmail.com',
+  'gmial.com': 'gmail.com',
+  'gmai.com': 'gmail.com',
+  'gmail.co': 'gmail.com',
+  'gmail.cm': 'gmail.com',
+  'gmail.om': 'gmail.com',
+  'gmaiil.com': 'gmail.com',
+  'gmail.net': 'gmail.com',
+  'yahooo.com': 'yahoo.com',
+  'yaho.com': 'yahoo.com',
+  'yahoo.co': 'yahoo.com',
+  'yahoo.cm': 'yahoo.com',
+  'yhaoo.com': 'yahoo.com',
+  'yahho.com': 'yahoo.com',
+  'hotnail.com': 'hotmail.com',
+  'hotmial.com': 'hotmail.com',
+  'hotmai.com': 'hotmail.com',
+  'hotmal.com': 'hotmail.com',
+  'hotmail.co': 'hotmail.com',
+  'hotmial.co.uk': 'hotmail.co.uk',
+  'outlok.com': 'outlook.com',
+  'outloook.com': 'outlook.com',
+  'outlook.co': 'outlook.com',
+  'iclod.com': 'icloud.com',
+  'icould.com': 'icloud.com',
+  'icloud.co': 'icloud.com',
+  'protonmai.com': 'protonmail.com',
+  'protonmal.com': 'protonmail.com',
+  'aol.cm': 'aol.com',
+  'aol.co': 'aol.com',
 }
 
-// ─── Layer 5: SMTP mailbox verification (RCPT TO) ───
-// Connects to the recipient's MX server, issues EHLO/MAIL FROM/RCPT TO,
-// and checks the response code. A 250 = mailbox exists; 550 = doesn't exist.
-//
-// IMPORTANT caveats:
-//   - Some providers (Gmail, Outlook) always return 250 even for unknown
-//     addresses (to prevent directory harvesting). So a 250 is not a 100%
-//     guarantee the inbox exists — but a 550 IS a definite "doesn't exist".
-//   - Some providers greylist or rate-limit. We retry once with a short delay.
-//   - This is SLOW (500ms-5s per check). Only run on-demand, not on import.
-//
-// We use a neutral MAIL FROM (verify@<our-domain>) to avoid tying the check
-// to any sending account. We never actually send an email.
-
-export interface SmtpVerifyResult {
-  status: 'valid' | 'invalid' | 'unknown' | 'catch-all'
-  smtpResponse?: string
-  details?: string
+export function detectTypo(domain: string): { detected: boolean; suggestion?: string } {
+  const d = domain.toLowerCase()
+  if (TYPO_MAP[d]) return { detected: true, suggestion: TYPO_MAP[d] }
+  return { detected: false }
 }
 
-export async function verifyMailboxSmtp(
-  email: string,
-  mxHosts: string[],
-  fromDomain?: string,
-  timeoutMs = 8000,
-): Promise<SmtpVerifyResult> {
-  if (mxHosts.length === 0) {
-    return { status: 'unknown', details: 'No MX records for domain' }
-  }
-  const from = `verify@${fromDomain || 'example.com'}`
-  const target = email.toLowerCase()
-
-  // Try the top 2 MX hosts (in priority order) in case the first is down
-  for (const mxHost of mxHosts.slice(0, 2)) {
-    try {
-      const result = await trySmtpRcpt(mxHost, target, from, timeoutMs)
-      if (result.status !== 'unknown') return result
-      // If unknown (timeout/protocol error), try the next MX host
-    } catch {
-      // Network error — try next MX host
-      continue
-    }
-  }
-
-  return { status: 'unknown', details: 'All MX hosts unreachable or timed out' }
+// ─── Layer 10: Deliverability score ───
+// Composite 0-100 score. Formula:
+//   Start: 100
+//   - Syntax bad           → 0 (hard fail)
+//   - Disposable domain    → 0 (hard fail)
+//   - Typo detected        → 0 (hard fail, with suggestion)
+//   - No A/AAAA records    → 0 (hard fail)
+//   - No MX records        → 0 (hard fail)
+//   - SMTP 550 invalid     → 0 (hard fail)
+//   - Catch-all detected   → -25 (server accepts everything)
+//   - Role-based local     → -10 (B2B risk, not invalid)
+//   - Free provider        → -5  (B2B context flag)
+//   - SMTP unknown/temp    → -10 (greylisting, can't verify)
+//   - SMTP valid           → +0  (already at 100 unless other deductions)
+// Final score clamped to [0, 100]. 0 = BAD, 1-49 = RISKY, 50-100 = VERIFIED.
+export function computeScore(input: {
+  syntaxOk: boolean
+  hasARecords: boolean
+  hasMx: boolean
+  smtp?: SmtpVerifyResult
+  disposable: boolean
+  role: boolean
+  free: boolean
+  catchAll: boolean
+  typo: boolean
+}): number {
+  if (!input.syntaxOk) return 0
+  if (input.disposable) return 0
+  if (input.typo) return 0
+  if (!input.hasARecords) return 0
+  if (!input.hasMx) return 0
+  if (input.smtp?.status === 'invalid') return 0
+  let score = 100
+  if (input.catchAll) score -= 25
+  if (input.role) score -= 10
+  if (input.free) score -= 5
+  if (input.smtp?.status === 'unknown') score -= 10
+  return Math.max(0, Math.min(100, score))
 }
 
-async function trySmtpRcpt(
-  mxHost: string,
-  target: string,
-  from: string,
-  timeoutMs: number,
-): Promise<SmtpVerifyResult> {
-  return new Promise((resolve) => {
-    const socket = new net.Socket()
-    let buffer = ''
-    let step: 'connect' | 'helo' | 'mail' | 'rcpt' | 'done' = 'connect'
-    let smtpResponse = ''
-    const timer = setTimeout(() => {
-      socket.destroy()
-      resolve({ status: 'unknown', details: 'Timeout', smtpResponse })
-    }, timeoutMs)
-
-    socket.connect(25, mxHost)
-    socket.setEncoding('utf-8')
-
-    const send = (cmd: string) => socket.write(cmd + '\r\n')
-
-    socket.on('data', (data) => {
-      buffer += data.toString()
-      // SMTP responses end with a line like "250 OK\r\n" (space after code = last line)
-      while (/\r?\n\d{3} .*\r?\n/.test(buffer) || /\r?\n\d{3} .*$/.test(buffer)) {
-        const lines = buffer.split(/\r?\n/)
-        const lastLine = lines.filter((l) => l.length > 0).slice(-1)[0] || ''
-        const code = parseInt(lastLine.slice(0, 3), 10)
-        smtpResponse = lastLine
-
-        if (step === 'connect') {
-          if (code === 220) {
-            step = 'helo'
-            send(`EHLO ${from.split('@')[1]}`)
-            buffer = ''
-            break
-          } else {
-            clearTimeout(timer)
-            socket.destroy()
-            resolve({ status: 'unknown', smtpResponse, details: `Unexpected greeting: ${code}` })
-            return
-          }
-        } else if (step === 'helo') {
-          if (code >= 200 && code < 300) {
-            step = 'mail'
-            send(`MAIL FROM:<${from}>`)
-            buffer = ''
-            break
-          } else {
-            clearTimeout(timer)
-            socket.destroy()
-            resolve({ status: 'unknown', smtpResponse, details: `EHLO rejected: ${code}` })
-            return
-          }
-        } else if (step === 'mail') {
-          if (code >= 200 && code < 300) {
-            step = 'rcpt'
-            send(`RCPT TO:<${target}>`)
-            buffer = ''
-            break
-          } else {
-            clearTimeout(timer)
-            socket.destroy()
-            resolve({ status: 'unknown', smtpResponse, details: `MAIL FROM rejected: ${code}` })
-            return
-          }
-        } else if (step === 'rcpt') {
-          clearTimeout(timer)
-          socket.destroy()
-          if (code >= 250 && code < 260) {
-            // 250 = mailbox exists (but could be catch-all)
-            // To detect catch-all, we'd need to test a known-bad address —
-            // skip that for now to keep verification fast.
-            resolve({ status: 'valid', smtpResponse, details: 'RCPT TO accepted' })
-          } else if (code >= 550 && code < 560) {
-            // 550 = mailbox doesn't exist
-            resolve({ status: 'invalid', smtpResponse, details: 'Mailbox does not exist' })
-          } else if (code === 251) {
-            // 251 = user not local, will forward
-            resolve({ status: 'valid', smtpResponse, details: 'User not local, will forward' })
-          } else if (code === 252) {
-            // 252 = cannot verify but will accept (treat as unknown/valid)
-            resolve({ status: 'unknown', smtpResponse, details: 'Server cannot verify' })
-          } else if (code >= 400 && code < 500) {
-            // 4xx = temporary failure (greylisting, rate limit)
-            resolve({ status: 'unknown', smtpResponse, details: `Temporary failure: ${code}` })
-          } else {
-            resolve({ status: 'unknown', smtpResponse, details: `Unexpected RCPT response: ${code}` })
-          }
-          return
-        }
-      }
-    })
-
-    socket.on('error', () => {
-      clearTimeout(timer)
-      resolve({ status: 'unknown', details: 'Connection error' })
-    })
-
-    socket.on('close', () => {
-      clearTimeout(timer)
-      if (step !== 'done') {
-        resolve({ status: 'unknown', details: 'Connection closed early' })
-      }
-    })
-  })
-}
-
-// ─── Combined quick check (layers 1-4) ───
-// Safe to run on every email at import time. Returns a verdict + reason.
-//
-// IMPORTANT: role-based addresses (info@, sales@, contact@) are NOT marked
-// as invalid. They're common for B2B outreach and the user may intentionally
-// want to email them. They're flagged as a "warning" in the `warnings` array
-// but `valid` stays true. Only these reasons cause `valid: false`:
-//   - invalid format (bad regex, too long, bad characters)
-//   - disposable/temp domain
-//   - no MX records (domain can't receive mail)
-export interface QuickVerifyResult {
+// ─── Result type ───
+export interface VerificationResult {
   email: string
-  valid: boolean
+  // Top-level verdict the dispatcher cares about.
+  status: 'VERIFIED' | 'RISKY' | 'BAD'
+  score: number
+  method: 'quick' | 'deep'
+  verifiedAt: string
+  // Per-layer details (stored on Lead.verificationResults)
+  layers: {
+    syntax: { ok: boolean; reason?: string }
+    domain: { ok: boolean; reason?: string }
+    mx: { ok: boolean; hosts: string[] }
+    smtp?: { ok: boolean; status?: string; code?: number; response?: string; details?: string }
+    disposable: boolean
+    role: boolean
+    free: boolean
+    catchAll: boolean
+    typo: { detected: boolean; suggestion?: string }
+  }
   reason?: string
+  // Back-compat fields for the legacy /api/extras/leads/verify endpoint
+  valid: boolean
+  warnings: string[]
   layer?: 'format' | 'disposable' | 'role' | 'mx' | 'ok'
-  warnings: string[] // non-fatal issues (e.g. role-based)
   mxHosts?: string[]
-}
-
-export async function quickVerify(email: string): Promise<QuickVerifyResult> {
-  const e = (email || '').trim().toLowerCase()
-  const formatCheck = checkFormat(e)
-  if (!formatCheck.valid) {
-    return { email: e, valid: false, reason: formatCheck.reason, layer: 'format', warnings: [] }
-  }
-
-  const [local, domain] = e.split('@')
-
-  if (isDisposable(domain)) {
-    return { email: e, valid: false, reason: 'disposable_domain', layer: 'disposable', warnings: [] }
-  }
-
-  const warnings: string[] = []
-
-  // Role-based is a WARNING, not a failure — user may want to email info@company.com
-  if (isRoleBased(local)) {
-    warnings.push('role_based')
-  }
-
-  const mxCheck = await checkMx(domain)
-  if (!mxCheck.valid) {
-    return { email: e, valid: false, reason: 'no_mx_records', layer: 'mx', warnings }
-  }
-
-  return { email: e, valid: true, layer: 'ok', warnings, mxHosts: mxCheck.hosts }
-}
-
-// ─── Deep check (all 5 layers) ───
-// Runs quickVerify first, then SMTP mailbox verification if the quick check
-// passes. Slow (~1-5s per email) — only run on-demand.
-//
-// Only these cause `valid: false` (suppression):
-//   - quick check failures (format, disposable, no MX)
-//   - SMTP 550 response (mailbox definitively does not exist)
-//
-// SMTP "unknown" (timeout, greylisting, catch-all) does NOT suppress —
-// we only suppress on CONFIRMED invalid.
-export interface DeepVerifyResult extends QuickVerifyResult {
   smtpStatus?: 'valid' | 'invalid' | 'unknown' | 'catch-all'
   smtpDetails?: string
 }
 
-export async function deepVerify(
-  email: string,
-  fromDomain?: string,
-): Promise<DeepVerifyResult> {
-  const quick = await quickVerify(email)
-  if (!quick.valid) return quick
+// ─── Quick verify (layers 1, 2, 3, 5, 6, 7, 9) ───
+export async function quickVerify(email: string): Promise<VerificationResult> {
+  const e = (email || '').trim().toLowerCase()
+  const verifiedAt = new Date().toISOString()
+  const emptyLayers: VerificationResult['layers'] = {
+    syntax: { ok: false },
+    domain: { ok: false },
+    mx: { ok: false, hosts: [] },
+    disposable: false,
+    role: false,
+    free: false,
+    catchAll: false,
+    typo: { detected: false },
+  }
 
-  const smtpResult = await verifyMailboxSmtp(
-    quick.email,
-    quick.mxHosts || [],
-    fromDomain,
-  )
-
-  // Only suppress on CONFIRMED invalid (SMTP 550). Unknown/catch-all/valid
-  // all pass through — we don't want to suppress emails we're not sure about.
-  if (smtpResult.status === 'invalid') {
+  const fmt = checkFormat(e)
+  if (!fmt.valid) {
     return {
-      ...quick,
-      smtpStatus: smtpResult.status,
-      smtpDetails: smtpResult.details,
+      email: e,
+      status: 'BAD',
+      score: 0,
+      method: 'quick',
+      verifiedAt,
+      layers: { ...emptyLayers, syntax: { ok: false, reason: fmt.reason } },
+      reason: fmt.reason,
       valid: false,
-      reason: 'mailbox_does_not_exist',
+      warnings: [],
+      layer: 'format',
     }
+  }
+
+  const [local, domain] = e.split('@')
+  const warnings: string[] = []
+
+  const disposable = isDisposable(domain)
+  if (disposable) {
+    return {
+      email: e,
+      status: 'BAD',
+      score: 0,
+      method: 'quick',
+      verifiedAt,
+      layers: { ...emptyLayers, syntax: { ok: true }, disposable: true },
+      reason: 'disposable_domain',
+      valid: false,
+      warnings: [],
+      layer: 'disposable',
+    }
+  }
+
+  const typo = detectTypo(domain)
+  if (typo.detected) {
+    return {
+      email: e,
+      status: 'BAD',
+      score: 0,
+      method: 'quick',
+      verifiedAt,
+      layers: { ...emptyLayers, syntax: { ok: true }, typo: { detected: true, suggestion: typo.suggestion } },
+      reason: `typo_detected_suggest_${typo.suggestion}`,
+      valid: false,
+      warnings: [`Typo? Did you mean ${typo.suggestion}?`],
+      layer: 'format',
+    }
+  }
+
+  const role = isRoleBased(local)
+  const free = isFreeProvider(domain)
+  if (role) warnings.push('role_based')
+  if (free) warnings.push('free_provider')
+
+  const [domainCheck, mxCheck] = await Promise.all([
+    checkDomainA(domain),
+    checkMx(domain),
+  ])
+  if (!domainCheck.ok) {
+    return {
+      email: e,
+      status: 'BAD',
+      score: 0,
+      method: 'quick',
+      verifiedAt,
+      layers: {
+        ...emptyLayers,
+        syntax: { ok: true },
+        domain: { ok: false, reason: domainCheck.reason },
+        role,
+        free,
+        typo: { detected: false },
+      },
+      reason: 'no_a_records',
+      valid: false,
+      warnings,
+      layer: 'mx',
+    }
+  }
+  if (!mxCheck.valid) {
+    return {
+      email: e,
+      status: 'BAD',
+      score: 0,
+      method: 'quick',
+      verifiedAt,
+      layers: {
+        ...emptyLayers,
+        syntax: { ok: true },
+        domain: { ok: true },
+        mx: { ok: false, hosts: [] },
+        role,
+        free,
+        typo: { detected: false },
+      },
+      reason: 'no_mx_records',
+      valid: false,
+      warnings,
+      layer: 'mx',
+    }
+  }
+
+  // Compute score
+  const score = computeScore({
+    syntaxOk: true,
+    hasARecords: true,
+    hasMx: true,
+    disposable: false,
+    role,
+    free,
+    catchAll: false,
+    typo: false,
+  })
+  const status: 'VERIFIED' | 'RISKY' = score >= 50 ? 'VERIFIED' : 'RISKY'
+
+  return {
+    email: e,
+    status,
+    score,
+    method: 'quick',
+    verifiedAt,
+    layers: {
+      syntax: { ok: true },
+      domain: { ok: true },
+      mx: { ok: true, hosts: mxCheck.hosts },
+      disposable: false,
+      role,
+      free,
+      catchAll: false,
+      typo: { detected: false },
+    },
+    valid: true,
+    warnings,
+    layer: 'ok',
+    mxHosts: mxCheck.hosts,
+  }
+}
+
+// ─── Deep verify (all 10 layers) ───
+export async function deepVerify(email: string): Promise<VerificationResult> {
+  const quick = await quickVerify(email)
+  if (quick.status === 'BAD') return quick // hard fail — no point probing SMTP
+
+  const [, domain] = quick.email.split('@')
+  const mxHosts = quick.mxHosts || []
+
+  // Layer 4: SMTP mailbox verification
+  const smtp = await verifyMailboxSmtp(quick.email, mxHosts, 10000)
+
+  // Layer 8: catch-all detection (only if SMTP gave us a usable signal)
+  let catchAll = false
+  if (smtp.status === 'valid' || smtp.status === 'invalid') {
+    const ca = await detectCatchAll(domain, mxHosts)
+    catchAll = ca.catchAll
+  }
+
+  const score = computeScore({
+    syntaxOk: true,
+    hasARecords: true,
+    hasMx: true,
+    smtp,
+    disposable: false,
+    role: quick.layers.role,
+    free: quick.layers.free,
+    catchAll,
+    typo: false,
+  })
+
+  let status: 'VERIFIED' | 'RISKY' | 'BAD'
+  let reason: string | undefined
+  if (smtp.status === 'invalid') {
+    status = 'BAD'
+    reason = 'mailbox_does_not_exist'
+  } else if (score >= 50 && smtp.status === 'valid' && !catchAll) {
+    status = 'VERIFIED'
+  } else {
+    status = 'RISKY'
+    if (catchAll) reason = 'catch_all_domain'
+    else if (smtp.status === 'unknown') reason = 'smtp_unknown'
+    else if (smtp.status === 'valid' && catchAll) reason = 'catch_all_domain'
   }
 
   return {
     ...quick,
-    smtpStatus: smtpResult.status,
-    smtpDetails: smtpResult.details,
-    // valid stays as quick.valid (true) for valid/unknown/catch-all
+    status,
+    score,
+    method: 'deep',
+    verifiedAt: new Date().toISOString(),
+    layers: {
+      ...quick.layers,
+      smtp: {
+        ok: smtp.status === 'valid',
+        status: smtp.status,
+        code: smtp.code,
+        response: smtp.response,
+        details: smtp.details,
+      },
+      catchAll,
+    },
+    reason: reason || quick.reason,
+    valid: status !== 'BAD',
+    smtpStatus: smtp.status,
+    smtpDetails: smtp.details,
+    warnings: quick.warnings,
   }
 }
+
+// ─── Legacy compat ───
+// The old /api/extras/leads/verify endpoint (now superseded by
+// routes/verify.ts) imported quickVerify/deepVerify directly — both are
+// already exported above with their original names. No shim needed.

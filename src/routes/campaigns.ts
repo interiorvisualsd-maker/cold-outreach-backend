@@ -1,12 +1,16 @@
 import { Hono } from 'hono'
 import { db } from '../lib/db'
+import { getUserId } from '../lib/auth'
 import { pickVariant } from '../lib/variants'
+import crypto from 'node:crypto'
 
 const app = new Hono()
 
-// GET /api/campaigns
+// GET /api/campaigns — scoped to current user
 app.get('/', async (c) => {
+  const userId = getUserId(c)
   const campaigns = await db.campaign.findMany({
+    where: { ownerId: userId },
     orderBy: { createdAt: 'desc' },
     include: {
       _count: {
@@ -19,6 +23,7 @@ app.get('/', async (c) => {
 
 // GET /api/campaigns/:id
 app.get('/:id', async (c) => {
+  const userId = getUserId(c)
   const campaign = await db.campaign.findUnique({
     where: { id: c.req.param('id') },
     include: {
@@ -26,22 +31,25 @@ app.get('/:id', async (c) => {
       _count: { select: { leads: true, scheduledEmails: true } },
     },
   })
-  if (!campaign) return c.json({ error: 'Not found' }, 404)
+  if (!campaign || campaign.ownerId !== userId) return c.json({ error: 'Not found' }, 404)
   return c.json({ campaign })
 })
 
 // POST /api/campaigns — create campaign
 app.post('/', async (c) => {
+  const userId = getUserId(c)
   const body = await c.req.json()
-  const { name, sendingWindowStart, sendingWindowEnd, timezone, fromNameOverride } = body
+  const { name, sendingWindowStart, sendingWindowEnd, timezone, fromNameOverride, allowedClickDomains } = body
   if (!name) return c.json({ error: 'name required' }, 400)
   const campaign = await db.campaign.create({
     data: {
+      ownerId: userId,
       name,
       sendingWindowStart: sendingWindowStart ?? 9,
       sendingWindowEnd: sendingWindowEnd ?? 17,
       timezone: timezone ?? 'America/New_York',
       fromNameOverride: fromNameOverride ?? null,
+      allowedClickDomains: allowedClickDomains ?? null,
     },
   })
   return c.json({ campaign })
@@ -49,10 +57,15 @@ app.post('/', async (c) => {
 
 // PUT /api/campaigns/:id
 app.put('/:id', async (c) => {
+  const userId = getUserId(c)
+  const id = c.req.param('id')
+  const existing = await db.campaign.findUnique({ where: { id } })
+  if (!existing || existing.ownerId !== userId) return c.json({ error: 'Not found' }, 404)
+
   const body = await c.req.json()
-  const { name, status, sendingWindowStart, sendingWindowEnd, timezone, fromNameOverride } = body
+  const { name, status, sendingWindowStart, sendingWindowEnd, timezone, fromNameOverride, allowedClickDomains } = body
   const campaign = await db.campaign.update({
-    where: { id: c.req.param('id') },
+    where: { id },
     data: {
       ...(name !== undefined && { name }),
       ...(status !== undefined && { status }),
@@ -60,6 +73,7 @@ app.put('/:id', async (c) => {
       ...(sendingWindowEnd !== undefined && { sendingWindowEnd }),
       ...(timezone !== undefined && { timezone }),
       ...(fromNameOverride !== undefined && { fromNameOverride }),
+      ...(allowedClickDomains !== undefined && { allowedClickDomains }),
     },
   })
   return c.json({ campaign })
@@ -67,13 +81,21 @@ app.put('/:id', async (c) => {
 
 // DELETE /api/campaigns/:id
 app.delete('/:id', async (c) => {
-  await db.campaign.delete({ where: { id: c.req.param('id') } }).catch(() => null)
+  const userId = getUserId(c)
+  const id = c.req.param('id')
+  const existing = await db.campaign.findUnique({ where: { id } })
+  if (!existing || existing.ownerId !== userId) return c.json({ error: 'Not found' }, 404)
+  await db.campaign.delete({ where: { id } }).catch(() => null)
   return c.json({ ok: true })
 })
 
 // POST /api/campaigns/:id/steps — define or update a step
 app.post('/:id/steps', async (c) => {
+  const userId = getUserId(c)
   const campaignId = c.req.param('id')
+  const existing = await db.campaign.findUnique({ where: { id: campaignId } })
+  if (!existing || existing.ownerId !== userId) return c.json({ error: 'Not found' }, 404)
+
   const body = await c.req.json()
   const { stepNumber, delayDays, subject, body: stepBody } = body
   if (!stepNumber || !subject || !stepBody) {
@@ -88,29 +110,24 @@ app.post('/:id/steps', async (c) => {
 })
 
 // POST /api/campaigns/:id/start — queue all pending leads for step 1.
-// Also serves as "resume" for paused campaigns: it only queues leads still
-// at status 'pending' (leads already at step1_sent/step2_sent are left alone
-// for the dispatcher's follow-up tick to handle).
+//
+// GUARD: refuses to start a campaign where any leads have verificationStatus
+// in ('PENDING', 'VERIFYING', 'BAD'). This is the "no bad emails slip to
+// campaign under any circumstances" guarantee at the campaign-start layer.
+// The dispatcher's claim query ALSO enforces this — belt and suspenders.
 app.post('/:id/start', async (c) => {
+  const userId = getUserId(c)
   const campaignId = c.req.param('id')
   const campaign = await db.campaign.findUnique({
     where: { id: campaignId },
     include: { steps: true },
   })
-  if (!campaign) return c.json({ error: 'Campaign not found' }, 404)
+  if (!campaign || campaign.ownerId !== userId) return c.json({ error: 'Campaign not found' }, 404)
   if (campaign.steps.length === 0) return c.json({ error: 'No steps defined — add at least one sequence step before starting.' }, 400)
 
   const step1 = campaign.steps.find((s) => s.stepNumber === 1)
   if (!step1) return c.json({ error: 'Step 1 not defined' }, 400)
 
-  // Get all pending leads
-  const leads = await db.lead.findMany({
-    where: { campaignId, status: 'pending' },
-  })
-
-  // Guard: block start if there are no leads at all in the campaign.
-  // This prevents the user from starting an empty campaign and then
-  // wondering why nothing sends.
   const totalLeadsInCampaign = await db.lead.count({ where: { campaignId } })
   if (totalLeadsInCampaign === 0) {
     return c.json({
@@ -118,73 +135,117 @@ app.post('/:id/start', async (c) => {
     }, 400)
   }
 
-  // Distinguish "start" (from draft) vs "resume" (from paused) for logging
-  const isResume = campaign.status === 'paused'
+  // ─── Verification gate ───
+  const badLeads = await db.lead.count({
+    where: {
+      campaignId,
+      verificationStatus: { in: ['PENDING', 'VERIFYING', 'BAD'] },
+    },
+  })
+  // PENDING + null count too
+  const pendingOrUnverified = await db.lead.count({
+    where: {
+      campaignId,
+      OR: [
+        { verificationStatus: 'PENDING' },
+        { verificationStatus: null },
+        { verificationStatus: '' },
+        { verificationStatus: 'VERIFYING' },
+        { verificationStatus: 'BAD' },
+      ],
+    },
+  })
+  if (pendingOrUnverified > 0) {
+    return c.json({
+      error:
+        `Cannot start: ${pendingOrUnverified} leads are not yet VERIFIED ` +
+        `(PENDING, VERIFYING, or BAD). Run email verification first via the ` +
+        `Verify tab. (bad=${badLeads})`,
+      code: 'verification_required',
+      pendingOrUnverified,
+      badLeads,
+    }, 400)
+  }
 
+  // Get all pending leads
+  const leads = await db.lead.findMany({
+    where: { campaignId, status: 'pending' },
+  })
+
+  const isResume = campaign.status === 'paused'
   const now = new Date()
-  // Schedule step 1 within sending window, staggered over next 24h
+
+  // Build the scheduled email rows. Set trackingId on each.
   const scheduled: any[] = []
   for (const lead of leads) {
-    // Use lead's custom CSV message if present, otherwise pick a random
-    // variant from the step's `|||`-separated subject/body fields.
     const subject = lead.outreachSubject || pickVariant(step1.subject)
     const body = lead.initialOutreach || pickVariant(step1.body)
-    // Stagger: spread leads across the next few sending windows
     const offset = Math.floor(Math.random() * 60 * 60 * 1000) // random within 1h
     const scheduledAt = new Date(now.getTime() + offset)
     scheduled.push({
       campaignId,
       leadId: lead.id,
+      ownerId: userId,
       stepNumber: 1,
       subject,
       body,
       scheduledAt,
+      trackingId: crypto.randomUUID(),
     })
   }
 
-  if (scheduled.length > 0) {
-    await db.scheduledEmail.createMany({ data: scheduled })
-  }
-
-  await db.campaign.update({
-    where: { id: campaignId },
-    data: { status: 'active' },
+  // ─── Transaction: bulk-insert + status update ───
+  await db.$transaction(async (tx) => {
+    if (scheduled.length > 0) {
+      await tx.scheduledEmail.createMany({ data: scheduled })
+    }
+    await tx.campaign.update({
+      where: { id: campaignId },
+      data: { status: 'active' },
+    })
   })
 
-  // Update lead statuses to reflect queueing
-  await db.lead.updateMany({
-    where: { campaignId, status: 'pending' },
-    data: { status: 'pending' }, // stays pending until step 1 actually sends
-  })
-
-  console.log(`[campaign] ${isResume ? 'RESUME' : 'START'} ${campaignId} → 200 · queued ${scheduled.length} step-1 emails · ${totalLeadsInCampaign} total leads`)
+  console.log(
+    `[campaign] ${isResume ? 'RESUME' : 'START'} ${campaignId} → 200 · queued ${scheduled.length} step-1 emails · ${totalLeadsInCampaign} total leads`
+  )
 
   return c.json({ queued: scheduled.length, campaign: { ...campaign, status: 'active' } })
 })
 
 // POST /api/campaigns/:id/pause
 app.post('/:id/pause', async (c) => {
-  const campaign = await db.campaign.update({
-    where: { id: c.req.param('id') },
-    data: { status: 'paused' },
-  })
-  // Cancel queued emails
-  await db.scheduledEmail.updateMany({
-    where: { campaignId: campaign.id, status: 'queued' },
-    data: { status: 'cancelled' },
+  const userId = getUserId(c)
+  const id = c.req.param('id')
+  const existing = await db.campaign.findUnique({ where: { id } })
+  if (!existing || existing.ownerId !== userId) return c.json({ error: 'Not found' }, 404)
+
+  // ─── Transaction: mark paused + cancel queued emails ───
+  const campaign = await db.$transaction(async (tx) => {
+    const updated = await tx.campaign.update({
+      where: { id },
+      data: { status: 'paused' },
+    })
+    await tx.scheduledEmail.updateMany({
+      where: { campaignId: id, status: 'queued' },
+      data: { status: 'cancelled' },
+    })
+    return updated
   })
   return c.json({ campaign })
 })
 
 // GET /api/campaigns/:id/leads — paginated leads
 app.get('/:id/leads', async (c) => {
+  const userId = getUserId(c)
   const campaignId = c.req.param('id')
+  const campaign = await db.campaign.findUnique({ where: { id: campaignId } })
+  if (!campaign || campaign.ownerId !== userId) return c.json({ error: 'Not found' }, 404)
+
   const page = Math.max(1, parseInt(c.req.query('page') || '1'))
   const limit = Math.min(parseInt(c.req.query('limit') || '50'), 200)
   const status = c.req.query('status')
 
   const where: any = { campaignId }
-  // Only filter by status if it's a valid status value (not 'undefined', 'all', or empty)
   if (status && status !== 'all' && status !== 'undefined' && status !== '') {
     where.status = status
   }

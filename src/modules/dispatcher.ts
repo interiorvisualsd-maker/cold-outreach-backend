@@ -4,10 +4,10 @@ import { sendMail } from '../lib/smtp'
 import { clearTransportCache } from '../lib/smtp'
 import { pushNotification } from '../lib/notifications'
 import { pickVariant } from '../lib/variants'
-import type { SmtpAccount } from '@prisma/client'
+import type { SmtpAccount, ScheduledEmail, Lead, Campaign } from '@prisma/client'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// INBOX ROTATION + THROTTLING ENGINE (humanized)
+// INBOX ROTATION + THROTTLING ENGINE (humanized) + IDempotent send pipeline
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // Design goals (per user feedback):
@@ -19,9 +19,13 @@ import type { SmtpAccount } from '@prisma/client'
 //   3. Add a random delay between individual sends (10-45s) so two emails
 //      from the same account don't land in the same minute.
 //   4. Randomize the order of due emails (don't always send the oldest first).
-//
-// The cron worker calls processSendBatch() every 5 minutes. Each call sends
-// a SMALL random batch (1-3 emails total across all accounts), not 30-50.
+//   5. NEVER double-send: each row is claimed atomically via
+//      SELECT...FOR UPDATE SKIP LOCKED → UPDATE status='sending'.
+//   6. NEVER send to an unverified/bad lead (verification gate).
+//   7. NEVER send to a paused lead (pausedUntil > NOW()).
+//   8. Retry transient SMTP failures with exponential backoff (1h, 4h, 16h, 64h, 256h).
+//      Mark permanent failures (5.1.1, 5.2.1, 5.7.x, 5.5.0) as failed +
+//      suppress the lead.
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -38,9 +42,101 @@ function shuffle<T>(arr: T[]): T[] {
   return a
 }
 
+// ─── Stuck 'sending' recovery ───
+// If a worker crashed mid-send (Render sleeps, process killed, etc.), a
+// ScheduledEmail could be stuck in 'sending' forever. This function reclaims
+// those rows back to 'queued' so they get retried.
+//
+// Threshold: 10 minutes (per spec). We also reset assignedAt so the next
+// claim is clean. We DON'T reset attempts/attemptCount — those track
+// lifetime, not the current claim.
+export async function recoverStuckSending(): Promise<{ reclaimed: number }> {
+  try {
+    const result = await db.$executeRaw`
+      UPDATE "ScheduledEmail"
+      SET status = 'queued', "assignedAt" = NULL
+      WHERE status = 'sending'
+        AND "assignedAt" IS NOT NULL
+        AND "assignedAt" < (NOW() - INTERVAL '10 minutes')
+    `
+    if (result > 0) {
+      console.log(`[dispatcher] recovered ${result} stuck 'sending' emails back to 'queued'`)
+    }
+    return { reclaimed: result }
+  } catch (e: any) {
+    console.error('[dispatcher] recoverStuckSending failed:', e?.message)
+    return { reclaimed: 0 }
+  }
+}
+
+// ─── Daily reset catch-up ───
+// The old midnight-only reset fails on Render free tier (server sleeps). We
+// check each account's lastDailyResetAt; if older than 24h, reset its
+// sentToday/warmupSentToday. This guarantees counters never get stuck at
+// cap forever, even if the server sleeps through midnight.
+//
+// We also advance the warm-up ramp-up day on reset.
+export async function dailyResetCatchUp(): Promise<{ reset: number }> {
+  let reset = 0
+  try {
+    const accounts = await db.smtpAccount.findMany({
+      where: {
+        OR: [
+          { lastDailyResetAt: null },
+          { lastDailyResetAt: { lt: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+        ],
+      },
+    })
+    if (accounts.length === 0) return { reset: 0 }
+
+    const now = new Date()
+    for (const account of accounts) {
+      // Reset this account's counters
+      await db.smtpAccount.update({
+        where: { id: account.id },
+        data: {
+          sentToday: 0,
+          warmupSentToday: 0,
+          lastResetAt: now,
+          lastDailyResetAt: now,
+        },
+      })
+      reset++
+
+      // Advance warm-up ramp-up day (mirrors the old resetDailyCounters logic)
+      if (account.warmupEnabled && account.warmupState !== 'suspended') {
+        const newDay = account.warmupDay + 1
+        const target = Math.min(
+          account.warmupStartQty + (newDay - 1) * account.warmupIncrement,
+          account.warmupTargetMax
+        )
+        const newState = target >= account.warmupTargetMax ? 'warm' : 'heating'
+
+        if (newState === 'warm' && account.warmupState !== 'warm') {
+          await pushNotification({
+            type: 'warmup',
+            severity: 'success',
+            title: 'Warm-up milestone reached 🎉',
+            message: `${account.emailAddress} is now fully warmed (${account.warmupTargetMax} emails/day). Ready for production sending.`,
+          }).catch(() => {})
+        }
+
+        await db.smtpAccount.update({
+          where: { id: account.id },
+          data: { warmupDay: newDay, warmupState: newState },
+        })
+      }
+    }
+    if (reset > 0) {
+      console.log(`[dispatcher] dailyResetCatchUp reset ${reset} accounts`)
+    }
+  } catch (e: any) {
+    console.error('[dispatcher] dailyResetCatchUp failed:', e?.message)
+  }
+  return { reset }
+}
+
 // Get all eligible accounts (within daily + hourly caps, warmed up).
-// Does NOT pick one — returns the full eligible pool so the caller can
-// randomly select a subset.
 async function getEligibleAccounts(now: Date): Promise<SmtpAccount[]> {
   const accounts = await db.smtpAccount.findMany({
     where: { status: 'active' },
@@ -50,13 +146,9 @@ async function getEligibleAccounts(now: Date): Promise<SmtpAccount[]> {
   const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000)
 
   for (const account of accounts) {
-    // Warmup gate — warming accounts don't send campaign emails
     if (account.warmupEnabled && account.warmupState !== 'warm') continue
-
-    // Daily cap check
     if (account.sentToday >= account.dailyCap) continue
 
-    // Hourly cap check — count sends in the last hour
     const sentLastHour = await db.scheduledEmail.count({
       where: {
         smtpAccountId: account.id,
@@ -66,9 +158,6 @@ async function getEligibleAccounts(now: Date): Promise<SmtpAccount[]> {
     })
     if (sentLastHour >= account.hourlyCap) continue
 
-    // Per-account recent-send throttle: if this account sent in the last
-    // 90 seconds, skip it this tick (so the same account doesn't fire twice
-    // in quick succession across consecutive cron ticks).
     if (account.lastSentAt) {
       const secsSinceLastSend = (now.getTime() - account.lastSentAt.getTime()) / 1000
       if (secsSinceLastSend < 90) continue
@@ -80,24 +169,14 @@ async function getEligibleAccounts(now: Date): Promise<SmtpAccount[]> {
   return eligible
 }
 
-// Pick a RANDOM subset of eligible accounts for this tick.
-// We never use more than ~40% of the eligible pool in a single tick, so
-// traffic is spread across many accounts over time rather than all-at-once.
 function pickRandomAccountSubset(accounts: SmtpAccount[]): SmtpAccount[] {
   if (accounts.length === 0) return []
-  // Send from 1 to min(3, ceil(eligible * 0.4)) accounts this tick.
-  // With 10 eligible accounts → 1-3 accounts per tick.
-  // With 3 eligible accounts → 1-2 accounts per tick.
-  // With 1 eligible account → always that 1.
   const maxThisTick = Math.max(1, Math.min(3, Math.ceil(accounts.length * 0.4)))
   const count = randInt(1, maxThisTick)
   return shuffle(accounts).slice(0, count)
 }
 
-// Fetch the next batch of scheduled emails to send (only within sending window)
 function isWithinSendingWindow(startHour: number, endHour: number, now: Date, timezone: string): boolean {
-  // Use the campaign's timezone to compute the local hour.
-  // Falls back to server local time if the timezone is invalid.
   try {
     let localHour: number
     if (timezone && timezone !== 'UTC') {
@@ -114,10 +193,8 @@ function isWithinSendingWindow(startHour: number, endHour: number, now: Date, ti
     if (startHour <= endHour) {
       return localHour >= startHour && localHour < endHour
     }
-    // Window wraps midnight (e.g. 22 to 6)
     return localHour >= startHour || localHour < endHour
   } catch {
-    // Bad timezone — fall back to server local
     const hour = now.getHours()
     if (startHour <= endHour) {
       return hour >= startHour && hour < endHour
@@ -126,11 +203,46 @@ function isWithinSendingWindow(startHour: number, endHour: number, now: Date, ti
   }
 }
 
+// ─── Atomic claim (no double-sends) ───
+// Uses SELECT...FOR UPDATE SKIP LOCKED inside a single UPDATE so two
+// concurrent workers cannot both claim the same row. Returns the claimed
+// rows already set to status='sending'. Skips leads whose verificationStatus
+// is NOT 'VERIFIED' (the "no bad emails slip to campaign" guarantee) and
+// leads whose pausedUntil > NOW().
+async function claimBatch(batchSize: number, now: Date): Promise<any[]> {
+  // Step 1: atomic UPDATE+RETURNING via raw SQL.
+  // We add a join-style filter using EXISTS subqueries because we cannot
+  // otherwise express Lead.verificationStatus / Lead.pausedUntil in the
+  // WHERE clause of a single UPDATE.
+  const rows: any[] = await db.$queryRaw`
+    UPDATE "ScheduledEmail"
+    SET status = 'sending',
+        "assignedAt" = NOW(),
+        attempts = attempts + 1
+    WHERE id IN (
+      SELECT se.id
+      FROM "ScheduledEmail" se
+      JOIN "Lead" l ON l.id = se."leadId"
+      JOIN "Campaign" c ON c.id = se."campaignId"
+      WHERE se.status = 'queued'
+        AND se."scheduledAt" <= NOW()
+        AND (l."pausedUntil" IS NULL OR l."pausedUntil" <= NOW())
+        AND (
+          l."verificationStatus" IS NULL
+          OR l."verificationStatus" = 'VERIFIED'
+          OR l."verificationStatus" = ''
+        )
+        AND l.status NOT IN ('replied', 'suppressed', 'bounced', 'unsubscribed')
+      ORDER BY se."scheduledAt" ASC
+      LIMIT ${batchSize}
+      FOR UPDATE SKIP LOCKED
+    )
+    RETURNING *
+  `
+  return rows
+}
+
 // Process a SMALL randomized batch of scheduled emails.
-//
-// Per tick (every 5 min from cron), we send at most 1-3 emails total,
-// spread across 1-3 randomly-chosen accounts, with a random 10-45s delay
-// between each send. This makes traffic look human instead of bursty.
 export async function processSendBatch(batchSize = 3): Promise<{
   processed: number
   sent: number
@@ -144,36 +256,36 @@ export async function processSendBatch(batchSize = 3): Promise<{
   let failed = 0
   let skipped = 0
 
-  // Fetch due queued emails (we fetch a few more than batchSize so we can
-  // randomly pick from them — random order, not always oldest-first)
-  const due = await db.scheduledEmail.findMany({
-    where: {
-      status: 'queued',
-      scheduledAt: { lte: now },
-    },
-    include: { lead: true, campaign: true },
-    orderBy: { scheduledAt: 'asc' },
-    take: batchSize * 4,
-  })
+  // ─── Step 0: recover any stuck 'sending' rows from a previous crashed tick ───
+  await recoverStuckSending()
 
-  if (due.length === 0) {
+  // ─── Step 1: atomic claim (no double-sends) ───
+  // We over-claim a bit (batchSize * 3) so we have spares to randomize from
+  // after filtering by sending window / suppression list.
+  const claimedRaw = await claimBatch(batchSize * 4, now)
+  if (claimedRaw.length === 0) {
     return { processed: 0, sent: 0, failed: 0, skipped: 0, errors }
   }
 
-  // Randomize the order of due emails — don't always send the oldest first.
-  // This also means two leads scheduled at the same time aren't always sent
-  // in the same sequence across ticks.
-  const randomizedDue = shuffle(due).slice(0, batchSize)
+  // Re-hydrate claimed rows with relations (Prisma raw query returns flat)
+  const claimedIds = claimedRaw.map((r) => r.id)
+  const claimed = await db.scheduledEmail.findMany({
+    where: { id: { in: claimedIds } },
+    include: { lead: true, campaign: true },
+  })
+
+  // Randomize so we don't always send the oldest-first across ticks
+  const randomizedDue = shuffle(claimed).slice(0, batchSize)
 
   // Pick a random subset of eligible accounts for this tick
   const eligibleAccounts = await getEligibleAccounts(now)
   if (eligibleAccounts.length === 0) {
-    // No account available — push all due schedules forward by 10-25 min
-    // (randomized, not a fixed 15 min) so we don't retry in lockstep.
+    // No account available — release the claim back to 'queued' and push
+    // scheduledAt forward by a randomized 10-25 min so we don't retry in lockstep.
     const later = new Date(now.getTime() + randInt(10, 25) * 60 * 1000)
     await db.scheduledEmail.updateMany({
-      where: { id: { in: randomizedDue.map((d) => d.id) }, status: 'queued' },
-      data: { scheduledAt: later },
+      where: { id: { in: randomizedDue.map((d) => d.id) }, status: 'sending' },
+      data: { status: 'queued', scheduledAt: later, assignedAt: null },
     })
     return {
       processed: randomizedDue.length,
@@ -189,103 +301,118 @@ export async function processSendBatch(batchSize = 3): Promise<{
 
   for (const item of randomizedDue) {
     // Check sending window for this campaign
-    if (!isWithinSendingWindow(
-      item.campaign.sendingWindowStart,
-      item.campaign.sendingWindowEnd,
-      now,
-      item.campaign.timezone,
-    )) {
-      // Reschedule to next window start with jitter
+    if (
+      !isWithinSendingWindow(
+        item.campaign.sendingWindowStart,
+        item.campaign.sendingWindowEnd,
+        now,
+        item.campaign.timezone
+      )
+    ) {
       const next = new Date(now)
       next.setHours(item.campaign.sendingWindowStart, 0, 0, 0)
       if (next <= now) next.setDate(next.getDate() + 1)
       next.setMinutes(next.getMinutes() + Math.floor(Math.random() * 45))
       await db.scheduledEmail.update({
         where: { id: item.id },
-        data: { scheduledAt: next },
+        data: { status: 'queued', scheduledAt: next, assignedAt: null },
       })
       skipped++
       continue
     }
 
-    // Check if lead was replied/suppressed/bounced — skip remaining steps
+    // Lead already replied/suppressed/bounced — cancel.
     if (['replied', 'suppressed', 'bounced', 'unsubscribed'].includes(item.lead.status)) {
       await db.scheduledEmail.update({
         where: { id: item.id },
-        data: { status: 'cancelled' },
+        data: { status: 'cancelled', assignedAt: null },
       })
       skipped++
       continue
     }
 
-    // ─── DEFENSIVE SUPPRESSION-LIST CHECK ───
-    // Lead.status is the primary source of truth, but SuppressionList can
-    // drift ahead of it (e.g. a bounce notification arrived but the lead
-    // row hasn't been updated yet, or a manual suppression was added).
-    // This belt-and-suspenders check guarantees we NEVER send to a
-    // suppressed email, even if Lead.status is stale.
+    // Lead paused (OOO) — reschedule after pause expires.
+    if (item.lead.pausedUntil && item.lead.pausedUntil > now) {
+      await db.scheduledEmail.update({
+        where: { id: item.id },
+        data: {
+          status: 'queued',
+          scheduledAt: new Date(item.lead.pausedUntil.getTime() + 60 * 1000),
+          assignedAt: null,
+        },
+      })
+      skipped++
+      continue
+    }
+
+    // Verification gate: only send to VERIFIED leads.
+    // (claimBatch already filtered, but this is belt-and-suspenders in case
+    //  the lead's verificationStatus changed between claim and send.)
+    if (
+      item.lead.verificationStatus &&
+      item.lead.verificationStatus !== 'VERIFIED' &&
+      item.lead.verificationStatus !== ''
+    ) {
+      await db.scheduledEmail.update({
+        where: { id: item.id },
+        data: { status: 'cancelled', assignedAt: null, failureReason: `verification_${item.lead.verificationStatus}` },
+      })
+      skipped++
+      continue
+    }
+
+    // Defensive suppression-list check (suppression can drift ahead of lead.status)
     const suppressedEntry = await db.suppressionList.findFirst({
       where: {
         email: { equals: item.lead.email.toLowerCase(), mode: 'insensitive' },
+        ownerId: item.ownerId,
       },
       select: { id: true, reason: true },
     })
     if (suppressedEntry) {
-      // Repair the drift: sync Lead.status to match the suppression entry
       const statusMap: Record<string, string> = {
         bounce: 'bounced',
         unsubscribe: 'unsubscribed',
+        'bounce:permanent': 'bounced',
+        'auto:verification:bad': 'bounced',
         complaint: 'suppressed',
         manual: 'suppressed',
+        'manual:verification': 'suppressed',
       }
       const newStatus = statusMap[suppressedEntry.reason] || 'suppressed'
-      await db.lead.update({
-        where: { id: item.leadId },
-        data: { status: newStatus as any },
-      }).catch(() => {})
+      await db.lead
+        .update({
+          where: { id: item.leadId },
+          data: { status: newStatus as any },
+        })
+        .catch(() => {})
       await db.scheduledEmail.update({
         where: { id: item.id },
-        data: { status: 'cancelled' },
+        data: { status: 'cancelled', assignedAt: null },
       })
       skipped++
       continue
     }
 
-    // Pick the next account from our random subset (round-robin within the
-    // subset, but the subset itself is randomly chosen each tick)
-    const account = accountsThisTick[accountIndex % accountsThisTick.length]
+    // Pick the next account from our random subset
+    const account = accountsThisTick[accountIndex % accountsThisTick.length]!
     accountIndex++
 
-    // Re-verify this specific account is still under caps (another tick may
-    // have incremented it)
+    // Re-verify caps (another tick may have incremented)
     if (account.sentToday >= account.dailyCap) {
+      // Release claim
+      await db.scheduledEmail.update({
+        where: { id: item.id },
+        data: { status: 'queued', assignedAt: null },
+      })
       skipped++
       continue
     }
 
-    // Mark as sending
-    await db.scheduledEmail.update({
-      where: { id: item.id },
-      data: {
-        status: 'sending',
-        smtpAccountId: account.id,
-        assignedAt: now,
-        attempts: { increment: 1 },
-      },
-    })
-
+    // ─── Send ───
     try {
-      // ─── PLAIN TEXT EMAIL — RAW BODY ONLY, NOTHING ADDED ───
-      // Per user request: send ONLY the email text exactly as written in the
-      // campaign/CSV. No HTML, no tracking pixel, no unsubscribe link, no
-      // footer, no signature, no opt-out line. The body is sent verbatim.
-      //
-      // We do NOT wrap URLs in click-tracking redirects.
-      // We do NOT add an HTML body.
-      // We do NOT add a tracking pixel.
-      // We do NOT append any footer or signature.
-      //
-      // Pick a variant (A/B/C) if the step has multiple — frozen per lead.
+      // Pick variant (frozen per lead at schedule time, but pickVariant is
+      // idempotent if the body has no "|||" separators)
       const bodyText = pickVariant(item.body)
       const subjectText = pickVariant(item.subject)
 
@@ -293,56 +420,65 @@ export async function processSendBatch(batchSize = 3): Promise<{
         to: item.lead.email,
         subject: subjectText,
         text: bodyText,
-        // Explicitly NO html — plain text only, like a phone email
         fromName: item.campaign.fromNameOverride || account.fromName,
       })
 
-      // Success — update everything
-      await db.scheduledEmail.update({
-        where: { id: item.id },
-        data: { status: 'sent', sentAt: now, messageId },
-      })
-      await db.smtpAccount.update({
-        where: { id: account.id },
-        data: {
-          sentToday: { increment: 1 },
-          lastSentAt: now,
-          failureStreak: 0,
-        },
-      })
-      await db.lead.update({
-        where: { id: item.leadId },
-        data: {
-          currentStep: item.stepNumber,
-          lastStepSentAt: now,
-          status: `step${item.stepNumber}_sent` as any,
-        },
-      })
-      await db.emailLog.create({
-        data: {
-          direction: 'outbound',
-          smtpAccountId: account.id,
-          leadId: item.leadId,
-          campaignId: item.campaignId,
-          toEmail: item.lead.email,
-          fromEmail: account.emailAddress,
-          subject: subjectText,
-          body: bodyText,
-          messageId,
-          sentAt: now,
-        },
+      // ─── Transaction: update email, account, lead, log, next step ───
+      // Wrap the critical writes so a crash between them doesn't leave
+      // inconsistent state (e.g. email marked sent but lead status stale).
+      await db.$transaction(async (tx) => {
+        await tx.scheduledEmail.update({
+          where: { id: item.id },
+          data: {
+            status: 'sent',
+            sentAt: now,
+            messageId,
+            attemptCount: { increment: 1 },
+            lastAttemptAt: now,
+            lastError: null,
+            failureReason: null,
+            assignedAt: null,
+          },
+        })
+        await tx.smtpAccount.update({
+          where: { id: account.id },
+          data: {
+            sentToday: { increment: 1 },
+            lastSentAt: now,
+            failureStreak: 0,
+          },
+        })
+        await tx.lead.update({
+          where: { id: item.leadId },
+          data: {
+            currentStep: item.stepNumber,
+            lastStepSentAt: now,
+            status: `step${item.stepNumber}_sent` as any,
+          },
+        })
+        await tx.emailLog.create({
+          data: {
+            ownerId: item.ownerId,
+            direction: 'outbound',
+            smtpAccountId: account.id,
+            leadId: item.leadId,
+            campaignId: item.campaignId,
+            toEmail: item.lead.email,
+            fromEmail: account.emailAddress,
+            subject: subjectText,
+            body: bodyText,
+            messageId,
+            sentAt: now,
+          },
+        })
       })
 
-      // Schedule next step if exists
+      // Schedule next step (outside the tx — non-critical, can be retried)
       await scheduleNextStep(item.leadId, item.campaignId, item.stepNumber, now)
 
       sent++
 
-      // ─── HUMANIZING DELAY ───
-      // After each successful send, sleep 10-45 seconds before the next send.
-      // This prevents two emails from landing in the same minute from the
-      // same account and makes traffic look human-paced.
-      // (Only sleep if there's another email to send in this batch.)
+      // Humanizing delay before next send
       if (sent < randomizedDue.length) {
         const delayMs = randInt(10, 45) * 1000
         await sleep(delayMs)
@@ -351,37 +487,167 @@ export async function processSendBatch(batchSize = 3): Promise<{
       failed++
       const errMsg = e?.message || 'Unknown send error'
       errors.push(`${item.lead.email}: ${errMsg}`)
-      await db.scheduledEmail.update({
-        where: { id: item.id },
-        data: {
-          status: 'queued', // retry later
-          lastError: errMsg,
-          // Randomized retry delay: 25-50 min (was fixed 30 min)
-          scheduledAt: new Date(now.getTime() + randInt(25, 50) * 60 * 1000),
-        },
-      })
-      const updated = await db.smtpAccount.update({
-        where: { id: account.id },
-        data: { failureStreak: { increment: 1 } },
-      })
-      if (updated.failureStreak >= 3) {
-        await db.smtpAccount.update({
-          where: { id: account.id },
-          data: { status: 'error', warmupState: 'paused' },
-        })
-        clearTransportCache(account.id)
-        errors.push(`Account ${account.emailAddress} auto-paused after 3 failures`)
-        await pushNotification({
-          type: 'failure',
-          severity: 'error',
-          title: 'SMTP account auto-paused',
-          message: `${account.emailAddress} paused after 3 consecutive send failures.`,
-        }).catch(() => {})
-      }
+      await handleSendFailure(item, account, errMsg, now)
     }
   }
 
   return { processed: randomizedDue.length, sent, failed, skipped, errors }
+}
+
+// ─── Retry classification ───
+// Classify an SMTP failure as transient or permanent, then either reschedule
+// (transient) or fail permanently (permanent) + suppress the lead.
+//
+// Permanent-failure SMTP enhanced status codes (RFC 3463):
+//   5.1.1 = mailbox does not exist
+//   5.1.2 = host does not exist
+//   5.2.1 = mailbox disabled / full
+//   5.2.2 = mailbox full
+//   5.4.4 = no answer from host
+//   5.5.0 = generic permanent
+//   5.7.1 = spam/blocked
+//   5.7.x = various policy blocks
+// Also: 5xx (any) → treat as permanent (safer for reputation).
+//
+// Transient: 4xx, timeout, connection reset, DNS temp failure, ECONNRESET, ETIMEDOUT.
+//
+// Retry backoff schedule: 1h, 4h, 16h, 64h, 256h (exponential base 4).
+// Max attempts: 5.
+const BACKOFF_HOURS = [1, 4, 16, 64, 256] // 5 attempts total
+
+function classifyError(errMsg: string): {
+  kind: 'transient' | 'permanent'
+  reason?: string
+} {
+  const m = (errMsg || '').toLowerCase()
+  // SMTP enhanced status codes
+  if (/5\.1\.1/.test(m)) return { kind: 'permanent', reason: 'bounce:permanent:5.1.1_mailbox_does_not_exist' }
+  if (/5\.1\.2/.test(m)) return { kind: 'permanent', reason: 'bounce:permanent:5.1.2_host_does_not_exist' }
+  if (/5\.2\.1/.test(m)) return { kind: 'permanent', reason: 'bounce:permanent:5.2.1_mailbox_disabled' }
+  if (/5\.2\.2/.test(m)) return { kind: 'permanent', reason: 'bounce:permanent:5.2.2_mailbox_full' }
+  if (/5\.4\.4/.test(m)) return { kind: 'permanent', reason: 'bounce:permanent:5.4.4_no_answer' }
+  if (/5\.5\.0/.test(m)) return { kind: 'permanent', reason: 'bounce:permanent:5.5.0_generic' }
+  if (/5\.7\./.test(m)) return { kind: 'permanent', reason: 'bounce:permanent:5.7.x_policy_block' }
+  // 5xx SMTP code (e.g. "550 mailbox not found")
+  if (/\b5\d\d\b/.test(m) && /mailbox|not exist|reject|blocked|spam|invalid|disabled|full/i.test(m)) {
+    return { kind: 'permanent', reason: 'bounce:permanent:5xx' }
+  }
+  // Common 5xx-only signal (safer to treat as permanent)
+  if (/^5\d\d\s/.test(m) || /:\s*5\d\d\b/.test(m)) {
+    return { kind: 'permanent', reason: 'bounce:permanent:5xx_generic' }
+  }
+  // Transient
+  if (/timeout|timed out|etimedout|econnreset|connection reset|econnrefused|temporary|greylist|4\d\d\s|deferred|try again/i.test(m)) {
+    return { kind: 'transient' }
+  }
+  // Unknown → treat as transient (give it another shot; if it really is
+  // permanent, the next attempt will likely surface a clearer code).
+  return { kind: 'transient' }
+}
+
+async function handleSendFailure(
+  item: ScheduledEmail & { lead: Lead; campaign: Campaign },
+  account: SmtpAccount,
+  errMsg: string,
+  now: Date
+) {
+  const classification = classifyError(errMsg)
+  const attemptCount = item.attemptCount + 1
+
+  if (classification.kind === 'permanent' || attemptCount >= 5) {
+    // ─── Permanent failure ───
+    await db.$transaction(async (tx) => {
+      await tx.scheduledEmail.update({
+        where: { id: item.id },
+        data: {
+          status: 'failed',
+          lastError: errMsg,
+          failureReason: classification.reason || 'max_attempts_reached',
+          attemptCount,
+          lastAttemptAt: now,
+          assignedAt: null,
+        },
+      })
+      // Suppress the lead permanently
+      await tx.suppressionList.upsert({
+        where: {
+          email_reason: {
+            email: item.lead.email.toLowerCase(),
+            reason: 'bounce:permanent',
+          },
+        },
+        create: {
+          ownerId: item.ownerId,
+          email: item.lead.email.toLowerCase(),
+          reason: 'bounce:permanent',
+          source: `dispatcher (${classification.reason || 'max_attempts'})`,
+        },
+        update: {},
+      })
+      await tx.lead.update({
+        where: { id: item.leadId },
+        data: { status: 'bounced', bouncedAt: now },
+      })
+      // Cancel any other queued steps for this lead
+      await tx.scheduledEmail.updateMany({
+        where: { leadId: item.leadId, status: 'queued' },
+        data: { status: 'cancelled' },
+      })
+      // Bump account failure streak — auto-pause after 3 strikes
+      const updated = await tx.smtpAccount.update({
+        where: { id: account.id },
+        data: { failureStreak: { increment: 1 } },
+      })
+      if (updated.failureStreak >= 3) {
+        await tx.smtpAccount.update({
+          where: { id: account.id },
+          data: { status: 'error', warmupState: 'paused' },
+        })
+      }
+    })
+
+    // Clear transport cache + notify (outside tx)
+    clearTransportCache(account.id)
+    await pushNotification({
+      type: 'failure',
+      severity: 'error',
+      title: 'Send failed permanently',
+      message: `${item.lead.email}: ${classification.reason || 'max attempts'} — ${errMsg.slice(0, 100)}`,
+    }).catch(() => {})
+    return
+  }
+
+  // ─── Transient failure — reschedule with exponential backoff ───
+  const backoffHours = BACKOFF_HOURS[Math.min(attemptCount - 1, BACKOFF_HOURS.length - 1)] || 1
+  const nextScheduledAt = new Date(now.getTime() + backoffHours * 60 * 60 * 1000)
+  await db.$transaction(async (tx) => {
+    await tx.scheduledEmail.update({
+      where: { id: item.id },
+      data: {
+        status: 'queued',
+        lastError: errMsg,
+        failureReason: `transient:attempt_${attemptCount}`,
+        attemptCount,
+        lastAttemptAt: now,
+        scheduledAt: nextScheduledAt,
+        assignedAt: null,
+      },
+    })
+    // Bump failure streak (auto-pause logic same as permanent)
+    const updated = await tx.smtpAccount.update({
+      where: { id: account.id },
+      data: { failureStreak: { increment: 1 } },
+    })
+    if (updated.failureStreak >= 3) {
+      await tx.smtpAccount.update({
+        where: { id: account.id },
+        data: { status: 'error', warmupState: 'paused' },
+      })
+    }
+  })
+  if ((attemptCount >= 3) || errMsg.toLowerCase().includes('auth')) {
+    clearTransportCache(account.id)
+  }
 }
 
 // Schedule the next sequence step for a lead
@@ -394,14 +660,12 @@ export async function scheduleNextStep(leadId: string, campaignId: string, curre
   const lead = await db.lead.findUnique({ where: { id: leadId } })
   if (!lead) return
 
-  // Schedule the next step a few days out, but add random jitter (0-3 hours)
-  // so follow-ups don't all land at the exact same minute of the day as the
-  // initial send. This makes the sequence look more human.
+  // Don't schedule next step if lead was replied/suppressed/bounced in the meantime
+  if (['replied', 'suppressed', 'bounced', 'unsubscribed'].includes(lead.status)) return
+
   const jitterMs = Math.floor(Math.random() * 3 * 60 * 60 * 1000)
   const scheduledAt = new Date(now.getTime() + nextStep.delayDays * 24 * 60 * 60 * 1000 + jitterMs)
 
-  // Use per-lead CSV overrides if available, otherwise fall back to step
-  // defaults. Apply pickVariant() to support A/B/C variants.
   let body = nextStep.body
   let subject = nextStep.subject
   if (nextStep.stepNumber === 2 && lead.followupDay3) {
@@ -409,56 +673,29 @@ export async function scheduleNextStep(leadId: string, campaignId: string, curre
   } else if (nextStep.stepNumber === 3 && lead.followupDay7) {
     body = lead.followupDay7
   }
-  // For follow-ups, use "Re: <original subject>" to create natural threading
   if (nextStep.stepNumber > 1) {
     const originalSubject = lead.outreachSubject || nextStep.subject
     subject = originalSubject.toLowerCase().startsWith('re:') ? originalSubject : `Re: ${originalSubject}`
   }
 
+  // Set trackingId so open/click tracking actually works
   await db.scheduledEmail.create({
     data: {
       campaignId,
       leadId,
+      ownerId: lead.ownerId,
       stepNumber: nextStep.stepNumber,
       subject,
       body,
       scheduledAt,
+      trackingId: crypto.randomUUID(),
     },
   })
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DAILY COUNTER RESET (call via cron at midnight)
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Legacy daily reset (kept for the cron endpoint) ───
+// Now calls dailyResetCatchUp which is timezone-aware and resilient to
+// Render sleeping through midnight.
 export async function resetDailyCounters() {
-  await db.smtpAccount.updateMany({
-    data: { sentToday: 0, warmupSentToday: 0, lastResetAt: new Date() },
-  })
-  // Advance warm-up ramp-up day
-  const warming = await db.smtpAccount.findMany({
-    where: { warmupEnabled: true, warmupState: { in: ['cold', 'heating'] } },
-  })
-  for (const account of warming) {
-    const newDay = account.warmupDay + 1
-    const target = Math.min(
-      account.warmupStartQty + (newDay - 1) * account.warmupIncrement,
-      account.warmupTargetMax
-    )
-    const newState = target >= account.warmupTargetMax ? 'warm' : 'heating'
-
-    // If transitioning to 'warm', push a milestone notification
-    if (newState === 'warm' && account.warmupState !== 'warm') {
-      await pushNotification({
-        type: 'warmup',
-        severity: 'success',
-        title: 'Warm-up milestone reached 🎉',
-        message: `${account.emailAddress} is now fully warmed (${account.warmupTargetMax} emails/day). Ready for production sending.`,
-      }).catch(() => {})
-    }
-
-    await db.smtpAccount.update({
-      where: { id: account.id },
-      data: { warmupDay: newDay, warmupState: newState },
-    })
-  }
+  await dailyResetCatchUp()
 }

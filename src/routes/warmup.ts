@@ -1,12 +1,14 @@
 import { Hono } from 'hono'
 import { db } from '../lib/db'
+import { getUserId } from '../lib/auth'
 
 const app = new Hono()
 
-// GET /api/warmup/stats — warm-up engine status
+// GET /api/warmup/stats — warm-up engine status (scoped to current user)
 app.get('/stats', async (c) => {
+  const userId = getUserId(c)
   const accounts = await db.smtpAccount.findMany({
-    where: { warmupEnabled: true },
+    where: { ownerId: userId, warmupEnabled: true },
     select: {
       id: true,
       label: true,
@@ -17,18 +19,33 @@ app.get('/stats', async (c) => {
       warmupStartQty: true,
       warmupIncrement: true,
       warmupSentToday: true,
+      sentToday: true,
+      dailyCap: true,
       status: true,
     },
     orderBy: { createdAt: 'asc' },
   })
 
+  const accountIdSet = new Set(accounts.map((a) => a.id))
   const today = new Date()
   today.setHours(0, 0, 0, 0)
   const [sentToday, completedToday, failedToday, rescuedToday] = await Promise.all([
-    db.warmupMessage.count({ where: { sentAt: { gte: today }, status: { in: ['sent', 'received', 'rescued', 'replied', 'completed'] } } }),
-    db.warmupMessage.count({ where: { status: 'completed', repliedAt: { gte: today } } }),
-    db.warmupMessage.count({ where: { status: 'failed', sentAt: { gte: today } } }),
-    db.warmupMessage.count({ where: { rescuedAt: { gte: today } } }),
+    db.warmupMessage.count({
+      where: {
+        sentAt: { gte: today },
+        status: { in: ['sent', 'received', 'rescued', 'replied', 'completed'] },
+        fromAccountId: { in: accounts.map((a) => a.id) },
+      },
+    }),
+    db.warmupMessage.count({
+      where: { status: 'completed', repliedAt: { gte: today }, fromAccountId: { in: accounts.map((a) => a.id) } },
+    }),
+    db.warmupMessage.count({
+      where: { status: 'failed', sentAt: { gte: today }, fromAccountId: { in: accounts.map((a) => a.id) } },
+    }),
+    db.warmupMessage.count({
+      where: { rescuedAt: { gte: today }, toAccountId: { in: accounts.map((a) => a.id) } },
+    }),
   ])
 
   return c.json({
@@ -59,9 +76,10 @@ app.post('/check-inbound', async (c) => {
 
 // POST /api/warmup/:id/toggle — enable/disable warmup for an account
 app.post('/:id/toggle', async (c) => {
+  const userId = getUserId(c)
   const id = c.req.param('id')
   const account = await db.smtpAccount.findUnique({ where: { id } })
-  if (!account) return c.json({ error: 'Not found' }, 404)
+  if (!account || account.ownerId !== userId) return c.json({ error: 'Not found' }, 404)
   const updated = await db.smtpAccount.update({
     where: { id },
     data: { warmupEnabled: !account.warmupEnabled },

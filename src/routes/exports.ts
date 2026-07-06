@@ -1,10 +1,12 @@
 import { Hono } from 'hono'
+import crypto from 'node:crypto'
 import { db } from '../lib/db'
+import { getUserId } from '../lib/auth'
 
 const app = new Hono()
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CSV EXPORT ENDPOINTS
+// CSV EXPORT ENDPOINTS — scoped to current user.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function toCsv(rows: Record<string, any>[], headers?: string[]): string {
@@ -31,9 +33,10 @@ function csvResponse(csv: string, filename: string) {
 
 // GET /api/extras/export/leads?campaignId=...&status=...
 app.get('/export/leads', async (c) => {
+  const userId = getUserId(c)
   const campaignId = c.req.query('campaignId')
   const status = c.req.query('status')
-  const where: any = {}
+  const where: any = { ownerId: userId }
   if (campaignId) where.campaignId = campaignId
   if (status) where.status = status
   const leads = await db.lead.findMany({
@@ -62,8 +65,9 @@ app.get('/export/leads', async (c) => {
 
 // GET /api/extras/export/replies?sentiment=...
 app.get('/export/replies', async (c) => {
+  const userId = getUserId(c)
   const sentiment = c.req.query('sentiment')
-  const where: any = {}
+  const where: any = { lead: { ownerId: userId } }
   if (sentiment) where.sentiment = sentiment
   const replies = await db.reply.findMany({
     where,
@@ -88,7 +92,11 @@ app.get('/export/replies', async (c) => {
 
 // GET /api/extras/export/suppression
 app.get('/export/suppression', async (c) => {
-  const items = await db.suppressionList.findMany({ orderBy: { createdAt: 'desc' } })
+  const userId = getUserId(c)
+  const items = await db.suppressionList.findMany({
+    where: { ownerId: userId },
+    orderBy: { createdAt: 'desc' },
+  })
   const rows = items.map((s) => ({
     email: s.email,
     reason: s.reason,
@@ -101,9 +109,10 @@ app.get('/export/suppression', async (c) => {
 
 // GET /api/extras/export/queue?status=...&campaignId=...
 app.get('/export/queue', async (c) => {
+  const userId = getUserId(c)
   const status = c.req.query('status')
   const campaignId = c.req.query('campaignId')
-  const where: any = {}
+  const where: any = { ownerId: userId }
   if (status) where.status = status
   if (campaignId) where.campaignId = campaignId
   const items = await db.scheduledEmail.findMany({
@@ -132,11 +141,13 @@ app.get('/export/queue', async (c) => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BULK LEAD ACTIONS
+// BULK LEAD ACTIONS — scoped to current user. All multi-step actions are
+// wrapped in transactions for atomicity (no partial writes).
 // ─────────────────────────────────────────────────────────────────────────────
 
 // POST /api/extras/leads/bulk — action: suppress | delete | requeue | cancel
 app.post('/leads/bulk', async (c) => {
+  const userId = getUserId(c)
   const body = await c.req.json()
   const { leadIds, action } = body as { leadIds: string[]; action: string }
   if (!leadIds || !Array.isArray(leadIds) || leadIds.length === 0) {
@@ -150,62 +161,69 @@ app.post('/leads/bulk', async (c) => {
 
   if (action === 'suppress') {
     const leads = await db.lead.findMany({
-      where: { id: { in: leadIds } },
+      where: { id: { in: leadIds }, ownerId: userId },
       select: { id: true, email: true },
     })
-    for (const lead of leads) {
-      await db.suppressionList.upsert({
-        where: { email_reason: { email: lead.email.toLowerCase(), reason: 'manual' } },
-        create: { email: lead.email.toLowerCase(), reason: 'manual', source: 'bulk-action' },
-        update: {},
+    await db.$transaction(async (tx) => {
+      for (const lead of leads) {
+        await tx.suppressionList.upsert({
+          where: { email_reason: { email: lead.email.toLowerCase(), reason: 'manual' } },
+          create: { ownerId: userId, email: lead.email.toLowerCase(), reason: 'manual', source: 'bulk-action' },
+          update: {},
+        })
+      }
+      await tx.lead.updateMany({
+        where: { id: { in: leadIds }, ownerId: userId },
+        data: { status: 'suppressed' },
       })
-    }
-    await db.lead.updateMany({
-      where: { id: { in: leadIds } },
-      data: { status: 'suppressed' },
-    })
-    await db.scheduledEmail.updateMany({
-      where: { leadId: { in: leadIds }, status: 'queued' },
-      data: { status: 'cancelled' },
+      await tx.scheduledEmail.updateMany({
+        where: { leadId: { in: leadIds }, ownerId: userId, status: 'queued' },
+        data: { status: 'cancelled' },
+      })
     })
     affected = leads.length
   } else if (action === 'delete') {
     // Cascade delete handles scheduledEmails + replies
-    const result = await db.lead.deleteMany({ where: { id: { in: leadIds } } })
+    const result = await db.lead.deleteMany({ where: { id: { in: leadIds }, ownerId: userId } })
     affected = result.count
   } else if (action === 'requeue') {
-    // Re-queue step 1 for leads that are pending or had errors
+    // Re-queue step 1 for leads that are pending or had errors.
+    // Wrapped in a transaction so we don't end up with stale queued rows + no
+    // new ones (or vice versa) if the create fails partway through.
     const leads = await db.lead.findMany({
-      where: { id: { in: leadIds } },
+      where: { id: { in: leadIds }, ownerId: userId },
       include: { campaign: { include: { steps: true } } },
     })
     for (const lead of leads) {
       const step1 = lead.campaign.steps.find((s) => s.stepNumber === 1)
       if (!step1) continue
-      // Cancel existing queued for this lead
-      await db.scheduledEmail.updateMany({
-        where: { leadId: lead.id, status: 'queued' },
-        data: { status: 'cancelled' },
-      })
-      await db.scheduledEmail.create({
-        data: {
-          campaignId: lead.campaignId,
-          leadId: lead.id,
-          stepNumber: 1,
-          subject: lead.outreachSubject || step1.subject,
-          body: lead.initialOutreach || step1.body,
-          scheduledAt: new Date(Date.now() + Math.random() * 60 * 60 * 1000),
-        },
-      })
-      await db.lead.update({
-        where: { id: lead.id },
-        data: { status: 'pending', currentStep: 0, lastStepSentAt: null },
+      await db.$transaction(async (tx) => {
+        await tx.scheduledEmail.updateMany({
+          where: { leadId: lead.id, ownerId: userId, status: 'queued' },
+          data: { status: 'cancelled' },
+        })
+        await tx.scheduledEmail.create({
+          data: {
+            campaignId: lead.campaignId,
+            leadId: lead.id,
+            ownerId: userId,
+            stepNumber: 1,
+            subject: lead.outreachSubject || step1.subject,
+            body: lead.initialOutreach || step1.body,
+            scheduledAt: new Date(Date.now() + Math.random() * 60 * 60 * 1000),
+            trackingId: crypto.randomUUID(),
+          },
+        })
+        await tx.lead.update({
+          where: { id: lead.id },
+          data: { status: 'pending', currentStep: 0, lastStepSentAt: null },
+        })
       })
       affected++
     }
   } else if (action === 'cancel') {
     const result = await db.scheduledEmail.updateMany({
-      where: { leadId: { in: leadIds }, status: 'queued' },
+      where: { leadId: { in: leadIds }, ownerId: userId, status: 'queued' },
       data: { status: 'cancelled' },
     })
     affected = result.count
@@ -214,53 +232,41 @@ app.post('/leads/bulk', async (c) => {
   return c.json({ ok: true, action, affected })
 })
 
-// POST /api/extras/leads/:id/suppress — suppress a single lead (add to
-// SuppressionList with reason 'manual', set lead.status='suppressed',
-// cancel any queued emails). Used by the per-row "Suppress" button in
-// the campaign leads table.
+// POST /api/extras/leads/:id/suppress — suppress a single lead
 app.post('/leads/:id/suppress', async (c) => {
+  const userId = getUserId(c)
   const leadId = c.req.param('id')
   const lead = await db.lead.findUnique({
     where: { id: leadId },
-    select: { id: true, email: true, campaign: { select: { name: true } } },
+    select: { id: true, ownerId: true, email: true, campaign: { select: { name: true } } },
   })
-  if (!lead) return c.json({ error: 'Lead not found' }, 404)
+  if (!lead || lead.ownerId !== userId) return c.json({ error: 'Lead not found' }, 404)
   if (!lead.email) return c.json({ error: 'Lead has no email' }, 400)
 
   const email = lead.email.toLowerCase()
-  await db.suppressionList.upsert({
-    where: { email_reason: { email, reason: 'manual' } },
-    create: { email, reason: 'manual', source: lead.campaign?.name || 'manual-suppress' },
-    update: {},
-  })
-  await db.lead.update({
-    where: { id: leadId },
-    data: { status: 'suppressed' },
-  })
-  await db.scheduledEmail.updateMany({
-    where: { leadId, status: 'queued' },
-    data: { status: 'cancelled' },
+  await db.$transaction(async (tx) => {
+    await tx.suppressionList.upsert({
+      where: { email_reason: { email, reason: 'manual' } },
+      create: { ownerId: userId, email, reason: 'manual', source: lead.campaign?.name || 'manual-suppress' },
+      update: {},
+    })
+    await tx.lead.update({ where: { id: leadId }, data: { status: 'suppressed' } })
+    await tx.scheduledEmail.updateMany({
+      where: { leadId, ownerId: userId, status: 'queued' },
+      data: { status: 'cancelled' },
+    })
   })
   return c.json({ ok: true, leadId, email, status: 'suppressed' })
 })
 
-// POST /api/extras/leads/verify — email verification for ALL pending leads.
-//
-// Runs multi-layer verification:
-//   1. Format check  2. Disposable domain check  3. Role-based address check
-//   4. MX record lookup  5. SMTP mailbox verification (RCPT TO) — deep mode only
-//
-// Body: { campaignId, mode: 'quick' | 'deep', force?: boolean }
-// Processes ONE batch per call (quick: 500, deep: 50).
-// Frontend auto-loops: calls verify repeatedly until remainingPending === 0.
-//
-// RESULTS ARE PERSISTED (sync): each lead gets verificationStatus, verificationMode,
-// verificationReason, verificationChecks, and verifiedAt set. The dashboard reads
-// these fields. By default, leads that already have a verificationStatus are SKIPPED
-// (so you never re-verify the same lead twice). Pass force=true to re-verify.
-//
-// Invalid leads are suppressed (bounced) and their queued emails cancelled.
+// ─────────────────────────────────────────────────────────────────────────────
+// LEGACY verification endpoint — kept for backwards compat with the
+// frontend's old "Verify Emails (Deep)" loop. New code should use
+// POST /api/verify/campaign/:id (async, queue-based, 10-layer verification).
+// ─────────────────────────────────────────────────────────────────────────────
+
 app.post('/leads/verify', async (c) => {
+  const userId = getUserId(c)
   const body = await c.req.json()
   const { campaignId, mode = 'quick', force = false } = body as {
     campaignId: string
@@ -273,14 +279,22 @@ app.post('/leads/verify', async (c) => {
     return c.json({ error: 'mode must be "quick" or "deep"' }, 400)
   }
 
-  // Count total pending (leads still needing verification).
-  // By default we skip leads that already have a verificationStatus.
+  // Verify campaign ownership
+  const campaign = await db.campaign.findUnique({ where: { id: campaignId } })
+  if (!campaign || campaign.ownerId !== userId) {
+    return c.json({ error: 'Campaign not found' }, 404)
+  }
+
   const pendingWhere = force
-    ? { campaignId, status: 'pending' }
-    : { campaignId, status: 'pending', verificationStatus: null }
+    ? { campaignId, ownerId: userId, status: 'pending' as const }
+    : {
+        campaignId,
+        ownerId: userId,
+        status: 'pending' as const,
+        verificationStatus: null as string | null,
+      }
 
   const totalPending = await db.lead.count({ where: pendingWhere })
-
   if (totalPending === 0) {
     return c.json({
       ok: true, mode, scanned: 0, totalPending: 0, remainingPending: 0,
@@ -290,9 +304,6 @@ app.post('/leads/verify', async (c) => {
   }
 
   const { quickVerify, deepVerify } = await import('../lib/emailVerify')
-  const fromDomain = process.env.PUBLIC_BASE_URL
-    ? new URL(process.env.PUBLIC_BASE_URL.startsWith('http') ? process.env.PUBLIC_BASE_URL : `https://${process.env.PUBLIC_BASE_URL}`).hostname
-    : undefined
 
   let valid = 0
   let invalid = 0
@@ -302,7 +313,7 @@ app.post('/leads/verify', async (c) => {
   const warningReasons: Record<string, number> = {}
   const leadUpdates: {
     id: string
-    status: 'valid' | 'invalid' | 'warning'
+    status: 'VERIFIED' | 'RISKY' | 'BAD'
     reason?: string
     checks: Record<string, string>
   }[] = []
@@ -321,48 +332,37 @@ app.post('/leads/verify', async (c) => {
   for (const lead of leads) {
     try {
       const result = mode === 'deep'
-        ? await deepVerify(lead.email, fromDomain)
+        ? await deepVerify(lead.email)
         : await quickVerify(lead.email)
 
       const checks: Record<string, string> = {}
-      checks.format = result.layer === 'format' && !result.valid ? 'fail' : 'pass'
-      checks.disposable = result.layer === 'disposable' && !result.valid ? 'fail' : 'pass'
-      const hasRoleWarn = result.warnings?.includes('role_based')
-      checks.role = hasRoleWarn ? 'warn' : 'pass'
-      checks.mx = result.layer === 'mx' && !result.valid ? 'fail' : 'pass'
+      checks.format = result.layers?.syntax?.ok === false ? 'fail' : 'pass'
+      checks.disposable = result.layers?.disposable ? 'fail' : 'pass'
+      checks.role = result.layers?.role ? 'warn' : 'pass'
+      checks.free = result.layers?.free ? 'warn' : 'pass'
+      checks.mx = result.layers?.mx?.ok === false ? 'fail' : 'pass'
       if (mode === 'deep') {
-        const smtpStatus = (result as any).smtpStatus as string | undefined
-        if (!result.valid && result.reason === 'mailbox_does_not_exist') {
-          checks.smtp = 'fail'
-        } else if (smtpStatus === 'valid') {
-          checks.smtp = 'pass'
-        } else if (smtpStatus === 'catch-all') {
-          checks.smtp = 'warn'
-        } else if (smtpStatus === 'unknown') {
-          checks.smtp = 'skip'
-        } else {
-          checks.smtp = 'pass'
-        }
+        const smtp = result.layers?.smtp
+        if (smtp?.status === 'invalid') checks.smtp = 'fail'
+        else if (smtp?.status === 'valid') checks.smtp = 'pass'
+        else if (smtp?.status === 'catch-all') checks.smtp = 'warn'
+        else checks.smtp = 'skip'
       } else {
         checks.smtp = 'skip'
       }
 
-      if (result.valid) {
-        const hasWarnings = (result.warnings?.length || 0) > 0
-        if (hasWarnings) {
-          warningsCount++
-          const reason = result.warnings!.join(',')
-          warningReasons[reason] = (warningReasons[reason] || 0) + 1
-          leadUpdates.push({ id: lead.id, status: 'warning', reason, checks })
-        } else {
-          valid++
-          leadUpdates.push({ id: lead.id, status: 'valid', checks })
-        }
+      const newStatus = result.status // 'VERIFIED' | 'RISKY' | 'BAD'
+      leadUpdates.push({ id: lead.id, status: newStatus, reason: result.reason, checks })
+
+      if (newStatus === 'VERIFIED') valid++
+      else if (newStatus === 'RISKY') {
+        warningsCount++
+        const reason = result.reason || 'risky'
+        warningReasons[reason] = (warningReasons[reason] || 0) + 1
       } else {
         invalid++
         const reasonKey = result.reason || 'unknown'
         invalidReasons[reasonKey] = (invalidReasons[reasonKey] || 0) + 1
-        leadUpdates.push({ id: lead.id, status: 'invalid', reason: reasonKey, checks })
         suppressedEmails.push({
           email: lead.email.toLowerCase(),
           reason: result.reason || 'verification_failed',
@@ -375,29 +375,16 @@ app.post('/leads/verify', async (c) => {
 
   for (const u of leadUpdates) {
     try {
-      if (u.status === 'invalid') {
-        await db.lead.update({
-          where: { id: u.id },
-          data: {
-            verificationStatus: 'invalid',
-            verificationMode: mode,
-            verificationReason: u.reason || null,
-            verificationChecks: JSON.stringify(u.checks),
-            verifiedAt: now,
-          },
-        })
-      } else {
-        await db.lead.update({
-          where: { id: u.id },
-          data: {
-            verificationStatus: u.status,
-            verificationMode: mode,
-            verificationReason: u.reason || null,
-            verificationChecks: JSON.stringify(u.checks),
-            verifiedAt: now,
-          },
-        })
-      }
+      await db.lead.update({
+        where: { id: u.id },
+        data: {
+          verificationStatus: u.status,
+          verificationMode: mode,
+          verificationReason: u.reason || null,
+          verificationChecks: JSON.stringify(u.checks),
+          verifiedAt: now,
+        },
+      })
     } catch {
       // non-fatal
     }
@@ -407,21 +394,22 @@ app.post('/leads/verify', async (c) => {
   for (const entry of suppressedEmails) {
     try {
       await db.suppressionList.upsert({
-        where: { email_reason: { email: entry.email, reason: 'bounce' } },
+        where: { email_reason: { email: entry.email, reason: 'auto:verification:bad' } },
         create: {
+          ownerId: userId,
           email: entry.email,
-          reason: 'bounce',
+          reason: 'auto:verification:bad',
           source: `email-verification (${entry.reason})`,
         },
         update: {},
       })
       await db.lead.updateMany({
-        where: { email: { equals: entry.email, mode: 'insensitive' }, campaignId },
+        where: { email: { equals: entry.email, mode: 'insensitive' }, ownerId: userId, campaignId },
         data: { status: 'bounced', bouncedAt: new Date() },
       })
       await db.scheduledEmail.updateMany({
         where: {
-          lead: { email: { equals: entry.email, mode: 'insensitive' }, campaignId },
+          lead: { email: { equals: entry.email, mode: 'insensitive' }, ownerId: userId },
           status: 'queued',
         },
         data: { status: 'cancelled' },
@@ -433,20 +421,6 @@ app.post('/leads/verify', async (c) => {
   }
 
   const remainingPending = await db.lead.count({ where: pendingWhere })
-
-  const invSummary = Object.entries(invalidReasons).map(([k, v]) => `${k}:${v}`).join(' ') || 'none'
-  const warnSummary = Object.entries(warningReasons).map(([k, v]) => `${k}:${v}`).join(' ') || 'none'
-  console.log(`[verify] ${mode.toUpperCase()} campaign=${campaignId} -> 200 . scanned=${leads.length}/${totalPending} remaining=${remainingPending} valid=${valid} invalid=${invalid} warnings=${warningsCount} errors=${errors} suppressed=${suppressed} | invalid[${invSummary}] warnings[${warnSummary}]`)
-
-  if (remainingPending === 0) {
-    const { pushNotification } = await import('../lib/notifications')
-    await pushNotification({
-      type: 'system',
-      severity: invalid > 0 ? 'warning' : 'success',
-      title: `Email verification complete (${mode})`,
-      message: `${valid} valid . ${invalid} invalid . ${warningsCount} warnings . ${errors} errors . ${suppressed} suppressed out of ${totalPending} total.`,
-    }).catch(() => {})
-  }
 
   return c.json({
     ok: true,
@@ -465,10 +439,13 @@ app.post('/leads/verify', async (c) => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// OPEN / CLICK TRACKING
+// OPEN / CLICK TRACKING — duplicated here for backwards compat with the
+// frontend's old /api/extras/t/o/:trackingId and /api/extras/t/c/:trackingId
+// URLs. The canonical handlers now live in src/app.ts (public, no auth) so
+// email clients can fetch them without a Bearer token. These authed routes
+// are kept for the frontend's "test tracking" buttons.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// GET /api/extras/t/o/:trackingId — tracking pixel (1x1 transparent GIF)
 app.get('/t/o/:trackingId', async (c) => {
   const trackingId = c.req.param('trackingId')
   const email = await db.scheduledEmail.findUnique({ where: { trackingId } })
@@ -481,7 +458,6 @@ app.get('/t/o/:trackingId', async (c) => {
       },
     })
   }
-  // 1x1 transparent GIF
   const gif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64')
   return new Response(gif, {
     headers: {
@@ -493,11 +469,19 @@ app.get('/t/o/:trackingId', async (c) => {
   })
 })
 
-// GET /api/extras/t/c/:trackingId?url=... — click redirect
 app.get('/t/c/:trackingId', async (c) => {
   const trackingId = c.req.param('trackingId')
   const url = c.req.query('url')
   if (!url) return c.json({ error: 'url query param required' }, 400)
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return c.json({ error: 'Invalid URL' }, 400)
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return c.json({ error: 'Unsafe redirect URL' }, 400)
+  }
   const email = await db.scheduledEmail.findUnique({ where: { trackingId } })
   if (email) {
     await db.scheduledEmail.update({
@@ -508,17 +492,18 @@ app.get('/t/c/:trackingId', async (c) => {
       },
     })
   }
-  return c.redirect(url)
+  return c.redirect(url, 302)
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PER-ACCOUNT WARMUP HISTORY (30-day trend)
+// PER-ACCOUNT WARMUP HISTORY (30-day trend) — scoped to current user
 // ─────────────────────────────────────────────────────────────────────────────
 
 app.get('/warmup-history/:accountId', async (c) => {
+  const userId = getUserId(c)
   const accountId = c.req.param('accountId')
   const account = await db.smtpAccount.findUnique({ where: { id: accountId } })
-  if (!account) return c.json({ error: 'Not found' }, 404)
+  if (!account || account.ownerId !== userId) return c.json({ error: 'Not found' }, 404)
 
   const now = new Date()
   const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
@@ -531,7 +516,6 @@ app.get('/warmup-history/:accountId', async (c) => {
     select: { sentAt: true, status: true, fromAccountId: true, toAccountId: true, rescuedAt: true },
   })
 
-  // Build 30-day series
   const series: { date: string; sent: number; received: number; rescued: number }[] = []
   for (let i = 29; i >= 0; i--) {
     const day = new Date(now)
@@ -555,30 +539,31 @@ app.get('/warmup-history/:accountId', async (c) => {
   return c.json({
     account: { id: account.id, label: account.label, emailAddress: account.emailAddress },
     series,
-    summary: { totalSent, totalReceived, totalRescued, avgPerDay: Math.round(totalSent / 30 * 10) / 10 },
+    summary: { totalSent, totalReceived, totalRescued, avgPerDay: Math.round((totalSent / 30) * 10) / 10 },
   })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CAMPAIGN ANALYTICS (per-campaign detailed stats)
+// CAMPAIGN ANALYTICS (per-campaign detailed stats) — scoped to current user
 // ─────────────────────────────────────────────────────────────────────────────
 
 app.get('/campaign-analytics/:id', async (c) => {
+  const userId = getUserId(c)
   const campaignId = c.req.param('id')
   const campaign = await db.campaign.findUnique({
     where: { id: campaignId },
     include: { steps: true },
   })
-  if (!campaign) return c.json({ error: 'Not found' }, 404)
+  if (!campaign || campaign.ownerId !== userId) return c.json({ error: 'Not found' }, 404)
 
   const [leads, emails, replies] = await Promise.all([
-    db.lead.findMany({ where: { campaignId }, select: { status: true } }),
+    db.lead.findMany({ where: { campaignId, ownerId: userId }, select: { status: true } }),
     db.scheduledEmail.findMany({
-      where: { campaignId },
+      where: { campaignId, ownerId: userId },
       select: { status: true, sentAt: true, openCount: true, clickCount: true, openedAt: true, clickedAt: true },
     }),
     db.reply.findMany({
-      where: { lead: { campaignId } },
+      where: { lead: { campaignId, ownerId: userId } },
       select: { sentiment: true, receivedAt: true },
     }),
   ])
@@ -601,7 +586,6 @@ app.get('/campaign-analytics/:id', async (c) => {
     return acc
   }, {} as Record<string, number>)
 
-  // 7-day trend for this campaign
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
   const recentSent = emails.filter((e) => e.sentAt && e.sentAt >= sevenDaysAgo)
   const trend: { date: string; sent: number; opened: number }[] = []

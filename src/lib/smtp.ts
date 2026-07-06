@@ -50,10 +50,16 @@ export async function getTransporter(account: SmtpAccount): Promise<nodemailer.T
     greetingTimeout: 5000,
     socketTimeout: 10000,
     tls: {
-      servername: account.smtpHost, // Use original hostname for TLS cert
-      rejectUnauthorized: false,
+      // Use original hostname for TLS cert validation (we connect by IP for
+      // IPv4-first DNS, but the cert is issued to the hostname).
+      servername: account.smtpHost,
+      // Re-enabled TLS verification — disabling it (rejectUnauthorized:false)
+      // allows MITM attacks and credential interception. If a specific
+      // provider ships a misconfigured cert, fix the provider config rather
+      // than weakening transport security globally. Workaround docs in README.
+      rejectUnauthorized: true,
     },
-  })
+  } as any)
   transportCache.set(account.id, { transporter, createdAt: Date.now() })
   return transporter
 }

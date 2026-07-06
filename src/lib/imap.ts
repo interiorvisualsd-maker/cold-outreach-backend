@@ -1,6 +1,7 @@
 import { ImapFlow } from 'imapflow'
 import type { SmtpAccount } from '@prisma/client'
 import { decrypt } from './crypto'
+import { simpleParser } from 'mailparser'
 
 export interface ImapMessage {
   uid: number
@@ -15,6 +16,8 @@ export interface ImapMessage {
   date: Date
   flags: string[]
   folder: string
+  // True if this message is a delivery-status notification (DSN / bounce).
+  isDeliveryStatus?: boolean
 }
 
 // Provider-specific spam folder name mapping
@@ -28,8 +31,6 @@ const SPAM_FOLDERS: Record<string, string[]> = {
 export function getSpamFolders(provider: string): string[] {
   return SPAM_FOLDERS[provider] || SPAM_FOLDERS.custom
 }
-
-const INBOX_FOLDERS = ['INBOX', 'Inbox']
 
 export async function getImapClient(account: SmtpAccount): Promise<ImapFlow> {
   const password = decrypt(account.imapPassEnc)
@@ -53,7 +54,7 @@ export async function getImapClient(account: SmtpAccount): Promise<ImapFlow> {
 // IMPORTANT: We fetch ALL messages (read AND unread) since the last poll,
 // NOT just unread ones. This is critical because:
 //   - Many users read their mail on a phone (BlueMail, Gmail app, etc.)
-//   - The phone app marks messages as \\Seen when it syncs
+//   - The phone app marks messages as \Seen when it syncs
 //   - If we only fetched unread, bounces/replies that the user already saw
 //     on their phone would be invisible to the app → suppression list drift
 //
@@ -87,19 +88,21 @@ export async function fetchUnreadMessages(
               internalDate: true,
             }, { uid: true })
             if (!msg || !msg.envelope) continue
-            const text = await parseMessageBody(msg.source)
+            const parsed = await parseMessageBody(msg.source)
             messages.push({
               uid: msg.uid,
-              messageId: msg.envelope.messageId || '',
-              from: msg.envelope.from?.map((a: any) => a.address || '').join(', ') || '',
-              to: msg.envelope.to?.map((a: any) => a.address || '').join(', ') || '',
+              messageId: msg.envelope.messageId || parsed.messageId || '',
+              from: msg.envelope.from?.map((a: any) => a.address || '').join(', ') || parsed.from || '',
+              to: msg.envelope.to?.map((a: any) => a.address || '').join(', ') || parsed.to || '',
               subject: msg.envelope.subject || '(no subject)',
-              text,
-              inReplyTo: msg.envelope.inReplyTo,
-              references: (msg.envelope as any).references,
-              date: msg.envelope.date || msg.internalDate || new Date(),
+              text: parsed.text,
+              html: parsed.html,
+              inReplyTo: msg.envelope.inReplyTo || parsed.inReplyTo,
+              references: (msg.envelope as any).references || parsed.references,
+              date: msg.envelope.date ? new Date(msg.envelope.date) : (msg.internalDate ? new Date(msg.internalDate) : new Date()),
               flags: Array.isArray(msg.flags) ? msg.flags.map((f: any) => String(f)) : [],
               folder,
+              isDeliveryStatus: parsed.isDeliveryStatus,
             })
           }
         } finally {
@@ -168,22 +171,106 @@ export async function markMessageRead(
   }
 }
 
-// Simple text body extractor from raw message source
-async function parseMessageBody(source: Buffer): Promise<string> {
+// ─────────────────────────────────────────────────────────────────────────────
+// Proper MIME parser using `mailparser`.
+//
+// The previous naive parser only looked at the first text block after the
+// headers, which meant multipart/alternative and multipart/mixed messages
+// (the vast majority of real-world bounces and replies) had their bodies
+// silently dropped. mailparser correctly:
+//   - Decodes base64 / quoted-printable / 7bit / 8bit
+//   - Walks multipart trees (multipart/alternative, multipart/mixed,
+//     multipart/related, multipart/report)
+//   - Extracts text/plain and text/html parts
+//   - Detects message/delivery-status parts (used for bounce DSN parsing)
+//   - Handles MIME-encoded-word headers (=?utf-8?B?...?=)
+// ─────────────────────────────────────────────────────────────────────────────
+export interface ParsedBody {
+  text: string
+  html?: string
+  messageId?: string
+  inReplyTo?: string
+  references?: string
+  from?: string
+  to?: string
+  isDeliveryStatus: boolean
+}
+
+export async function parseMessageBody(source: Buffer | undefined | null): Promise<ParsedBody> {
+  if (!source || source.length === 0) {
+    return { text: '', isDeliveryStatus: false }
+  }
   try {
-    const raw = source.toString('utf-8')
-    // Very basic extraction — take text after first blank line, strip HTML tags
-    const parts = raw.split(/\r?\n\r?\n/)
-    if (parts.length < 2) return raw.slice(0, 2000)
-    let body = parts.slice(1).join('\n\n')
-    // Strip quoted headers
-    body = body.replace(/^On .* wrote:.*$/m, '').trim()
-    // Strip HTML tags if present
-    body = body.replace(/<[^>]*>/g, '')
-    // Decode basic quoted-printable
-    body = body.replace(/=\r?\n/g, '').replace(/=([0-9A-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
-    return body.slice(0, 5000)
-  } catch {
-    return ''
+    const parsed = await simpleParser(source, {
+      // Skip heavy HTML-to-text conversion — we want the raw text part.
+      skipHtmlToText: true,
+      maxHtmlLengthToParse: 1024 * 1024, // 1MB cap
+    })
+
+    let text = parsed.text || ''
+    // If no text part but we have HTML, do a minimal tag-strip fallback so
+    // downstream regex (bounce/unsubscribe detection) still works.
+    if (!text && parsed.html) {
+      text = parsed.html.replace(/<[^>]*>/g, ' ').replace(/&[a-z]+;/gi, ' ').replace(/\s+/g, ' ').trim()
+    }
+    // Cap body size to keep DB + regex tractable
+    if (text.length > 20000) text = text.slice(0, 20000)
+
+    // Detect delivery-status parts (DSN bounces). mailparser exposes these
+    // as attachments with contentType 'message/delivery-status'.
+    let isDeliveryStatus = false
+    const ct = (parsed.headers.get('content-type') as any)?.value || parsed.headers.get('content-type') || ''
+    if (typeof ct === 'string' && /message\/delivery-status/i.test(ct)) {
+      isDeliveryStatus = true
+    }
+    if (Array.isArray(parsed.attachments)) {
+      for (const a of parsed.attachments as any[]) {
+        const act = a.contentType || a.headers?.['content-type'] || ''
+        if (/message\/delivery-status/i.test(act)) {
+          isDeliveryStatus = true
+          break
+        }
+      }
+    }
+    // Subject-based DSN heuristic (many providers don't set the MIME part)
+    const subj = String(parsed.subject || '')
+    if (
+      /delivery status notification|undeliverable|mail delivery failed|returned mail|delivery failure/i.test(
+        subj
+      )
+    ) {
+      isDeliveryStatus = true
+    }
+
+    const fromObj = parsed.from as any
+    const toObj = parsed.to as any
+    const fromValue: string | undefined = Array.isArray(fromObj?.value)
+      ? fromObj.value.map((a: any) => a.address).filter(Boolean).join(', ')
+      : fromObj?.text || fromObj?.value?.toString?.() || undefined
+    const toValue: string | undefined = Array.isArray(toObj?.value)
+      ? toObj.value.map((a: any) => a.address).filter(Boolean).join(', ')
+      : toObj?.text || toObj?.value?.toString?.() || undefined
+
+    return {
+      text,
+      html: parsed.html || undefined,
+      messageId: parsed.messageId || undefined,
+      inReplyTo: parsed.inReplyTo || undefined,
+      references: (parsed.headers.get('references') as string) || undefined,
+      from: fromValue || undefined,
+      to: toValue || undefined,
+      isDeliveryStatus,
+    }
+  } catch (e: any) {
+    console.error('[imap] mailparser failed, falling back to raw text:', e?.message)
+    // Last-resort fallback: take everything after the first blank line.
+    try {
+      const raw = source.toString('utf-8')
+      const parts = raw.split(/\r?\n\r?\n/)
+      const body = parts.length < 2 ? raw : parts.slice(1).join('\n\n')
+      return { text: body.slice(0, 20000), isDeliveryStatus: false }
+    } catch {
+      return { text: '', isDeliveryStatus: false }
+    }
   }
 }

@@ -1,19 +1,30 @@
 import crypto from 'node:crypto'
 import bcrypt from 'bcryptjs'
 
-// AES-256-GCM encryption for SMTP/IMAP credentials
+// AES-256-GCM encryption for SMTP/IMAP credentials.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// ENCRYPTION_KEY — no dev fallback. Misconfigured deploys must fail loudly.
+// If this changes after credentials are stored, those credentials become
+// unreadable (decryption will throw) and must be re-entered.
+// ─────────────────────────────────────────────────────────────────────────────
 const ALGO = 'aes-256-gcm'
 const IV_LEN = 12 // GCM standard IV length
 
+let _cachedKey: Buffer | null = null
 function getKey(): Buffer {
+  if (_cachedKey) return _cachedKey
   const secret = process.env.ENCRYPTION_KEY
-  if (!secret) {
-    // Dev fallback — MUST set ENCRYPTION_KEY in production
-    const fallback = 'lead-dispatcher-dev-key-change-me-32b!'
-    return crypto.createHash('sha256').update(fallback).digest()
+  if (!secret || secret.length < 16) {
+    throw new Error(
+      'FATAL: ENCRYPTION_KEY environment variable is missing or too short (min 16 chars). ' +
+        'Generate one with `openssl rand -hex 32` and set it before starting the server. ' +
+        'WARNING: if this key changes after credentials are stored, those credentials become unreadable.'
+    )
   }
   // Derive a 32-byte key from arbitrary-length secret
-  return crypto.createHash('sha256').update(secret).digest()
+  _cachedKey = crypto.createHash('sha256').update(secret).digest()
+  return _cachedKey
 }
 
 export function encrypt(plaintext: string): string {
