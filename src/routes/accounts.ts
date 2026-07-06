@@ -132,33 +132,44 @@ app.post('/', async (c) => {
   }
 
   // Both passed — save the account (ownerId scoping)
-  const account = await db.smtpAccount.create({
-    data: {
-      ownerId: userId,
-      label: d.label,
-      emailAddress: d.emailAddress.toLowerCase(),
-      fromName: d.fromName,
-      smtpHost: d.smtpHost,
-      smtpPort: d.smtpPort,
-      smtpUser: d.smtpUser,
-      smtpPassEnc: encrypt(d.smtpPass),
-      smtpSecure: d.smtpSecure,
-      imapHost: d.imapHost,
-      imapPort: d.imapPort,
-      imapUser: d.imapUser,
-      imapPassEnc: encrypt(d.imapPass),
-      imapSecure: d.imapSecure,
-      dailyCap: d.dailyCap,
-      hourlyCap: d.hourlyCap,
-      provider: d.provider,
-      warmupEnabled: d.warmupEnabled,
-      warmupStartQty: d.warmupStartQty,
-      warmupIncrement: d.warmupIncrement,
-      warmupTargetMax: d.warmupTargetMax,
-      lastDailyResetAt: new Date(),
-    },
-  })
-  return c.json({ account: { ...account, smtpPassEnc: undefined, imapPassEnc: undefined }, verified: true })
+  try {
+    const account = await db.smtpAccount.create({
+      data: {
+        ownerId: userId,
+        label: d.label,
+        emailAddress: d.emailAddress.toLowerCase(),
+        fromName: d.fromName,
+        smtpHost: d.smtpHost,
+        smtpPort: d.smtpPort,
+        smtpUser: d.smtpUser,
+        smtpPassEnc: encrypt(d.smtpPass),
+        smtpSecure: d.smtpSecure,
+        imapHost: d.imapHost,
+        imapPort: d.imapPort,
+        imapUser: d.imapUser,
+        imapPassEnc: encrypt(d.imapPass),
+        imapSecure: d.imapSecure,
+        dailyCap: d.dailyCap,
+        hourlyCap: d.hourlyCap,
+        provider: d.provider,
+        warmupEnabled: d.warmupEnabled,
+        warmupStartQty: d.warmupStartQty,
+        warmupIncrement: d.warmupIncrement,
+        warmupTargetMax: d.warmupTargetMax,
+        lastDailyResetAt: new Date(),
+      },
+    })
+    return c.json({ account: { ...account, smtpPassEnc: undefined, imapPassEnc: undefined }, verified: true })
+  } catch (err: any) {
+    // P2003 = foreign key violation. This happens if the user's JWT references
+    // a user that doesn't exist in the DB (e.g. after a DB wipe). Return 401
+    // so the frontend clears the token and redirects to login.
+    if (err?.code === 'P2003' || err?.code === 'P2002') {
+      return c.json({ error: 'Your session is invalid — please log in again', code: 'STALE_SESSION' }, 401)
+    }
+    console.error('[accounts] create error:', err?.message || err)
+    return c.json({ error: 'Failed to save account — please try again' }, 500)
+  }
 })
 
 // PUT /api/accounts/:id — update (credentials optional)
