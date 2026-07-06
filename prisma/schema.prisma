@@ -132,6 +132,11 @@ model Lead {
   bouncedAt       DateTime?
   unsubscribedAt  DateTime?
   verifiedAt      DateTime? // set when email verification confirmed the address is valid
+  // Detailed verification results (persisted so results are "sync").
+  verificationStatus  String? // "valid" | "invalid" | "warning" | "pending" | null
+  verificationMode     String? // "quick" | "deep" | null
+  verificationReason   String? // reason code for invalid/warning
+  verificationChecks   String? // JSON: { format, disposable, role, mx, smtp }
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -141,6 +146,7 @@ model Lead {
   @@unique([campaignId, email])
   @@index([campaignId, status])
   @@index([email])
+  @@index([verificationStatus])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

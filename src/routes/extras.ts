@@ -1535,4 +1535,280 @@ app.get('/campaigns/:id/validation-stats', async (c) => {
   return c.json(stats)
 })
 
+// ─────────────────────────────────────────────────────────────────────────────
+// VERIFICATION DASHBOARD — per-campaign verification results with drill-down
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/extras/verification/campaigns — summary of ALL campaigns with
+// verification stats. Powers the verification dashboard list view.
+app.get('/verification/campaigns', async (c) => {
+  const campaigns = await db.campaign.findMany({
+    select: {
+      id: true, name: true, status: true, totalLeads: true, createdAt: true, updatedAt: true,
+    },
+    orderBy: { updatedAt: 'desc' },
+  })
+
+  const result = []
+  for (const camp of campaigns) {
+    const leads = await db.lead.findMany({
+      where: { campaignId: camp.id },
+      select: { status: true, verificationStatus: true, verificationMode: true },
+    })
+    const total = leads.length
+    const verified = leads.filter((l) => l.verificationStatus !== null).length
+    const valid = leads.filter((l) => l.verificationStatus === 'valid').length
+    const warning = leads.filter((l) => l.verificationStatus === 'warning').length
+    const invalid = leads.filter((l) => l.verificationStatus === 'invalid').length
+    const unverified = leads.filter((l) => l.verificationStatus === null && l.status === 'pending').length
+    const bounced = leads.filter((l) => l.status === 'bounced').length
+    const sent = leads.filter((l) => ['step1_sent', 'step2_sent', 'step3_sent', 'replied'].includes(l.status)).length
+    // Determine verification state for this campaign
+    let verifyState: 'not_started' | 'in_progress' | 'complete' | 'no_leads' = 'not_started'
+    if (total === 0) verifyState = 'no_leads'
+    else if (verified === 0 && unverified > 0) verifyState = 'not_started'
+    else if (unverified > 0) verifyState = 'in_progress'
+    else verifyState = 'complete'
+
+    result.push({
+      id: camp.id,
+      name: camp.name,
+      campaignStatus: camp.status,
+      total,
+      verified,
+      valid,
+      warning,
+      invalid,
+      unverified,
+      bounced,
+      sent,
+      verifyState,
+    })
+  }
+
+  return c.json({ campaigns: result })
+})
+
+// GET /api/extras/verification/campaign/:id/leads — paginated, filterable list
+// of leads with their detailed verification results for the dashboard detail view.
+// Query: status=valid|warning|invalid|pending|all, mode=quick|deep|all,
+//        q=search term, page=1, pageSize=50
+app.get('/verification/campaign/:id/leads', async (c) => {
+  const campaignId = c.req.param('id')
+  const status = c.req.query('status') || 'all'
+  const mode = c.req.query('mode') || 'all'
+  const q = c.req.query('q') || ''
+  const page = Math.max(1, parseInt(c.req.query('page') || '1', 10))
+  const pageSize = Math.min(200, Math.max(10, parseInt(c.req.query('pageSize') || '50', 10)))
+
+  const where: any = { campaignId }
+  if (status === 'valid') where.verificationStatus = 'valid'
+  else if (status === 'warning') where.verificationStatus = 'warning'
+  else if (status === 'invalid') where.verificationStatus = 'invalid'
+  else if (status === 'pending') {
+    where.verificationStatus = null
+    where.status = 'pending'
+  }
+  if (mode === 'quick') where.verificationMode = 'quick'
+  else if (mode === 'deep') where.verificationMode = 'deep'
+  if (q) {
+    where.OR = [
+      { email: { contains: q } },
+      { companyName: { contains: q } },
+    ]
+  }
+
+  const [leads, total] = await Promise.all([
+    db.lead.findMany({
+      where,
+      select: {
+        id: true, email: true, companyName: true, website: true, industry: true,
+        status: true, verificationStatus: true, verificationMode: true,
+        verificationReason: true, verificationChecks: true, verifiedAt: true,
+        bouncedAt: true, currentStep: true, createdAt: true,
+      },
+      orderBy: { createdAt: 'desc' },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+    db.lead.count({ where }),
+  ])
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+
+  return c.json({
+    leads: leads.map((l) => ({
+      ...l,
+      verificationChecks: l.verificationChecks ? JSON.parse(l.verificationChecks) : null,
+    })),
+    total,
+    page,
+    pageSize,
+    totalPages,
+  })
+})
+
+// POST /api/extras/verification/leads/:id/reverify — re-verify a single lead.
+// Clears the old verification result and runs the specified mode.
+app.post('/verification/leads/:id/reverify', async (c) => {
+  const leadId = c.req.param('id')
+  const body = await c.req.json().catch(() => ({}))
+  const mode = (body.mode === 'deep' ? 'deep' : 'quick') as 'quick' | 'deep'
+
+  const lead = await db.lead.findUnique({
+    where: { id: leadId },
+    select: { id: true, email: true, campaignId: true, status: true },
+  })
+  if (!lead) return c.json({ error: 'Lead not found' }, 404)
+
+  const { quickVerify, deepVerify } = await import('../lib/emailVerify')
+  const fromDomain = process.env.PUBLIC_BASE_URL
+    ? new URL(process.env.PUBLIC_BASE_URL.startsWith('http') ? process.env.PUBLIC_BASE_URL : `https://${process.env.PUBLIC_BASE_URL}`).hostname
+    : undefined
+
+  const result = mode === 'deep'
+    ? await deepVerify(lead.email, fromDomain)
+    : await quickVerify(lead.email)
+
+  const checks: Record<string, string> = {}
+  checks.format = result.layer === 'format' && !result.valid ? 'fail' : 'pass'
+  checks.disposable = result.layer === 'disposable' && !result.valid ? 'fail' : 'pass'
+  const hasRoleWarn = result.warnings?.includes('role_based')
+  checks.role = hasRoleWarn ? 'warn' : 'pass'
+  checks.mx = result.layer === 'mx' && !result.valid ? 'fail' : 'pass'
+  if (mode === 'deep') {
+    const smtpStatus = (result as any).smtpStatus as string | undefined
+    if (!result.valid && result.reason === 'mailbox_does_not_exist') checks.smtp = 'fail'
+    else if (smtpStatus === 'valid') checks.smtp = 'pass'
+    else if (smtpStatus === 'catch-all') checks.smtp = 'warn'
+    else if (smtpStatus === 'unknown') checks.smtp = 'skip'
+    else checks.smtp = 'pass'
+  } else {
+    checks.smtp = 'skip'
+  }
+
+  let newStatus: 'valid' | 'invalid' | 'warning'
+  let reason: string | null = null
+  if (result.valid) {
+    if ((result.warnings?.length || 0) > 0) {
+      newStatus = 'warning'
+      reason = result.warnings!.join(',')
+    } else {
+      newStatus = 'valid'
+    }
+  } else {
+    newStatus = 'invalid'
+    reason = result.reason || 'unknown'
+  }
+
+  // If the lead was previously bounced/suppressed because of an invalid verify,
+  // and the re-verify now passes, restore it to pending so it can be sent.
+  const wasInvalid = lead.status === 'bounced'
+  const restoreToPending = wasInvalid && (newStatus === 'valid' || newStatus === 'warning')
+
+  await db.lead.update({
+    where: { id: leadId },
+    data: {
+      verificationStatus: newStatus,
+      verificationMode: mode,
+      verificationReason: reason,
+      verificationChecks: JSON.stringify(checks),
+      verifiedAt: new Date(),
+      ...(restoreToPending
+        ? { status: 'pending' as const, bouncedAt: null }
+        : newStatus === 'invalid'
+          ? { status: 'bounced' as const, bouncedAt: new Date() }
+          : {}),
+    },
+  })
+
+  // If now invalid, suppress + cancel queued emails
+  if (newStatus === 'invalid') {
+    const emailLower = lead.email.toLowerCase()
+    await db.suppressionList.upsert({
+      where: { email_reason: { email: emailLower, reason: 'bounce' } },
+      create: { email: emailLower, reason: 'bounce', source: `re-verify (${reason})` },
+      update: {},
+    }).catch(() => {})
+    await db.scheduledEmail.updateMany({
+      where: { leadId, status: 'queued' },
+      data: { status: 'cancelled' },
+    }).catch(() => {})
+  }
+
+  // If restoring to pending, remove the suppression entry
+  if (restoreToPending) {
+    await db.suppressionList.deleteMany({
+      where: { email: lead.email.toLowerCase(), reason: 'bounce' },
+    }).catch(() => {})
+  }
+
+  return c.json({
+    ok: true,
+    leadId,
+    email: lead.email,
+    verificationStatus: newStatus,
+    verificationMode: mode,
+    verificationReason: reason,
+    verificationChecks: checks,
+    leadStatus: restoreToPending ? 'pending' : (newStatus === 'invalid' ? 'bounced' : lead.status),
+  })
+})
+
+// POST /api/extras/verification/leads/:id/suppress — manually suppress a lead
+// (e.g. a warning lead the user decides not to email). Adds to SuppressionList,
+// sets Lead.status='suppressed', cancels queued emails.
+app.post('/verification/leads/:id/suppress', async (c) => {
+  const leadId = c.req.param('id')
+  const lead = await db.lead.findUnique({
+    where: { id: leadId },
+    select: { id: true, email: true, campaign: { select: { name: true } } },
+  })
+  if (!lead) return c.json({ error: 'Lead not found' }, 404)
+
+  const email = lead.email.toLowerCase()
+  await db.suppressionList.upsert({
+    where: { email_reason: { email, reason: 'manual' } },
+    create: { email, reason: 'manual', source: `verification-dashboard (${lead.campaign?.name || ''})` },
+    update: {},
+  })
+  await db.lead.update({
+    where: { id: leadId },
+    data: { status: 'suppressed' },
+  })
+  await db.scheduledEmail.updateMany({
+    where: { leadId, status: 'queued' },
+    data: { status: 'cancelled' },
+  })
+  return c.json({ ok: true, leadId, email, status: 'suppressed' })
+})
+
+// POST /api/extras/verification/leads/:id/restore — restore a suppressed/
+// bounced lead to pending (removes suppression entry, clears verification
+// status so it shows as unverified). Used when the user decides a warning
+// lead is actually fine to email.
+app.post('/verification/leads/:id/restore', async (c) => {
+  const leadId = c.req.param('id')
+  const lead = await db.lead.findUnique({
+    where: { id: leadId },
+    select: { id: true, email: true },
+  })
+  if (!lead) return c.json({ error: 'Lead not found' }, 404)
+
+  const email = lead.email.toLowerCase()
+  await db.suppressionList.deleteMany({
+    where: { email },
+  }).catch(() => {})
+  await db.lead.update({
+    where: { id: leadId },
+    data: {
+      status: 'pending',
+      bouncedAt: null,
+      // Keep verification status — the lead was verified, just restored to queue
+    },
+  })
+  return c.json({ ok: true, leadId, email, status: 'pending' })
+})
+
+
 export default app

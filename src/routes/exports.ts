@@ -244,34 +244,28 @@ app.post('/leads/:id/suppress', async (c) => {
   return c.json({ ok: true, leadId, email, status: 'suppressed' })
 })
 
-// POST /api/extras/leads/verify — deep email verification for a campaign's leads.
+// POST /api/extras/leads/verify — email verification for ALL pending leads.
 //
 // Runs multi-layer verification:
-//   1. Format check
-//   2. Disposable domain check
-//   3. Role-based address check
-//   4. MX record lookup
-//   5. SMTP mailbox verification (RCPT TO) — optional, slow
+//   1. Format check  2. Disposable domain check  3. Role-based address check
+//   4. MX record lookup  5. SMTP mailbox verification (RCPT TO) — deep mode only
 //
-// Body: { campaignId, mode: 'quick' | 'deep', limit?: number }
-//   - quick = layers 1-4 only (fast, ~100ms/email)
-//   - deep = all 5 layers including SMTP RCPT TO (slow, ~1-5s/email)
+// Body: { campaignId, mode: 'quick' | 'deep', force?: boolean }
+// Processes ONE batch per call (quick: 500, deep: 50).
+// Frontend auto-loops: calls verify repeatedly until remainingPending === 0.
 //
-// Invalid leads are:
-//   - Added to SuppressionList with reason 'bounce' and source 'email-verification'
-//   - Set to status 'bounced' with bouncedAt
-//   - Queued emails cancelled
+// RESULTS ARE PERSISTED (sync): each lead gets verificationStatus, verificationMode,
+// verificationReason, verificationChecks, and verifiedAt set. The dashboard reads
+// these fields. By default, leads that already have a verificationStatus are SKIPPED
+// (so you never re-verify the same lead twice). Pass force=true to re-verify.
 //
-// Returns immediately with a summary. The actual verification runs to
-// completion (the request is NOT async-backgrounded — it waits so the
-// caller gets the full result). For large lists, the caller should use a
-// limit and call repeatedly.
+// Invalid leads are suppressed (bounced) and their queued emails cancelled.
 app.post('/leads/verify', async (c) => {
   const body = await c.req.json()
-  const { campaignId, mode = 'quick', limit = 100 } = body as {
+  const { campaignId, mode = 'quick', force = false } = body as {
     campaignId: string
     mode: 'quick' | 'deep'
-    limit?: number
+    force?: boolean
   }
 
   if (!campaignId) return c.json({ error: 'campaignId required' }, 400)
@@ -279,29 +273,21 @@ app.post('/leads/verify', async (c) => {
     return c.json({ error: 'mode must be "quick" or "deep"' }, 400)
   }
 
-  // Allow large batches so the frontend can verify a whole campaign in one
-  // call. Deep mode (SMTP RCPT TO) is slow (~1-5s/email), so the frontend
-  // uses smaller batches for deep to stay under the 100s request timeout.
-  // Quick mode is fast (~100ms/email), so large batches are fine.
-  const cappedLimit = Math.min(limit || 100, 5000)
+  // Count total pending (leads still needing verification).
+  // By default we skip leads that already have a verificationStatus.
+  const pendingWhere = force
+    ? { campaignId, status: 'pending' }
+    : { campaignId, status: 'pending', verificationStatus: null }
 
-  // Only verify leads that are still pending AND haven't been verified yet.
-  // Setting verifiedAt on valid leads prevents the frontend loop from
-  // re-scanning the same valid leads forever.
-  const [leads, totalPending] = await Promise.all([
-    db.lead.findMany({
-      where: {
-        campaignId,
-        status: 'pending',
-        verifiedAt: null,
-      },
-      select: { id: true, email: true, campaign: { select: { name: true } } },
-      take: cappedLimit,
-    }),
-    db.lead.count({
-      where: { campaignId, status: 'pending', verifiedAt: null },
-    }),
-  ])
+  const totalPending = await db.lead.count({ where: pendingWhere })
+
+  if (totalPending === 0) {
+    return c.json({
+      ok: true, mode, scanned: 0, totalPending: 0, remainingPending: 0,
+      valid: 0, invalid: 0, warnings: 0, warningReasons: {},
+      errors: 0, suppressed: 0, invalidReasons: {},
+    })
+  }
 
   const { quickVerify, deepVerify } = await import('../lib/emailVerify')
   const fromDomain = process.env.PUBLIC_BASE_URL
@@ -311,11 +297,26 @@ app.post('/leads/verify', async (c) => {
   let valid = 0
   let invalid = 0
   let errors = 0
-  let warningsCount = 0 // non-fatal warnings (e.g. role-based emails)
+  let warningsCount = 0
   const invalidReasons: Record<string, number> = {}
   const warningReasons: Record<string, number> = {}
-  const suppressedEmails: { email: string; reason: string; details?: string }[] = []
-  const validLeadIds: string[] = [] // collected to batch-mark verifiedAt
+  const leadUpdates: {
+    id: string
+    status: 'valid' | 'invalid' | 'warning'
+    reason?: string
+    checks: Record<string, string>
+  }[] = []
+  const suppressedEmails: { email: string; reason: string }[] = []
+
+  const BATCH_SIZE = mode === 'deep' ? 50 : 500
+  const leads = await db.lead.findMany({
+    where: pendingWhere,
+    select: { id: true, email: true, campaign: { select: { name: true } } },
+    take: BATCH_SIZE,
+    orderBy: { id: 'asc' },
+  })
+
+  const now = new Date()
 
   for (const lead of leads) {
     try {
@@ -323,24 +324,48 @@ app.post('/leads/verify', async (c) => {
         ? await deepVerify(lead.email, fromDomain)
         : await quickVerify(lead.email)
 
+      const checks: Record<string, string> = {}
+      checks.format = result.layer === 'format' && !result.valid ? 'fail' : 'pass'
+      checks.disposable = result.layer === 'disposable' && !result.valid ? 'fail' : 'pass'
+      const hasRoleWarn = result.warnings?.includes('role_based')
+      checks.role = hasRoleWarn ? 'warn' : 'pass'
+      checks.mx = result.layer === 'mx' && !result.valid ? 'fail' : 'pass'
+      if (mode === 'deep') {
+        const smtpStatus = (result as any).smtpStatus as string | undefined
+        if (!result.valid && result.reason === 'mailbox_does_not_exist') {
+          checks.smtp = 'fail'
+        } else if (smtpStatus === 'valid') {
+          checks.smtp = 'pass'
+        } else if (smtpStatus === 'catch-all') {
+          checks.smtp = 'warn'
+        } else if (smtpStatus === 'unknown') {
+          checks.smtp = 'skip'
+        } else {
+          checks.smtp = 'pass'
+        }
+      } else {
+        checks.smtp = 'skip'
+      }
+
       if (result.valid) {
-        valid++
-        validLeadIds.push(lead.id)
-        // Track non-fatal warnings (e.g. role-based) for reporting
-        if (result.warnings && result.warnings.length > 0) {
+        const hasWarnings = (result.warnings?.length || 0) > 0
+        if (hasWarnings) {
           warningsCount++
-          for (const w of result.warnings) {
-            warningReasons[w] = (warningReasons[w] || 0) + 1
-          }
+          const reason = result.warnings!.join(',')
+          warningReasons[reason] = (warningReasons[reason] || 0) + 1
+          leadUpdates.push({ id: lead.id, status: 'warning', reason, checks })
+        } else {
+          valid++
+          leadUpdates.push({ id: lead.id, status: 'valid', checks })
         }
       } else {
         invalid++
         const reasonKey = result.reason || 'unknown'
         invalidReasons[reasonKey] = (invalidReasons[reasonKey] || 0) + 1
+        leadUpdates.push({ id: lead.id, status: 'invalid', reason: reasonKey, checks })
         suppressedEmails.push({
           email: lead.email.toLowerCase(),
           reason: result.reason || 'verification_failed',
-          details: 'smtpDetails' in result ? (result as any).smtpDetails : undefined,
         })
       }
     } catch {
@@ -348,15 +373,36 @@ app.post('/leads/verify', async (c) => {
     }
   }
 
-  // Mark valid leads as verified so the frontend loop doesn't re-scan them
-  if (validLeadIds.length > 0) {
-    await db.lead.updateMany({
-      where: { id: { in: validLeadIds } },
-      data: { verifiedAt: new Date() },
-    }).catch(() => {})
+  for (const u of leadUpdates) {
+    try {
+      if (u.status === 'invalid') {
+        await db.lead.update({
+          where: { id: u.id },
+          data: {
+            verificationStatus: 'invalid',
+            verificationMode: mode,
+            verificationReason: u.reason || null,
+            verificationChecks: JSON.stringify(u.checks),
+            verifiedAt: now,
+          },
+        })
+      } else {
+        await db.lead.update({
+          where: { id: u.id },
+          data: {
+            verificationStatus: u.status,
+            verificationMode: mode,
+            verificationReason: u.reason || null,
+            verificationChecks: JSON.stringify(u.checks),
+            verifiedAt: now,
+          },
+        })
+      }
+    } catch {
+      // non-fatal
+    }
   }
 
-  // Batch-suppress all invalid emails in a single pass
   let suppressed = 0
   for (const entry of suppressedEmails) {
     try {
@@ -382,28 +428,32 @@ app.post('/leads/verify', async (c) => {
       })
       suppressed++
     } catch {
-      // continue even if one suppress fails
+      // continue
     }
   }
 
-  // Push a notification with the results
-  const { pushNotification } = await import('../lib/notifications')
-  await pushNotification({
-    type: 'system',
-    severity: invalid > 0 ? 'warning' : 'success',
-    title: `Email verification complete (${mode})`,
-    message: `${valid} valid · ${invalid} invalid · ${warningsCount} warnings · ${errors} errors · ${suppressed} suppressed. Invalid: ${Object.entries(invalidReasons).map(([k, v]) => `${k}: ${v}`).join(', ') || 'none'}. Warnings: ${Object.entries(warningReasons).map(([k, v]) => `${k}: ${v}`).join(', ') || 'none'}`,
-  }).catch(() => {})
+  const remainingPending = await db.lead.count({ where: pendingWhere })
 
   const invSummary = Object.entries(invalidReasons).map(([k, v]) => `${k}:${v}`).join(' ') || 'none'
   const warnSummary = Object.entries(warningReasons).map(([k, v]) => `${k}:${v}`).join(' ') || 'none'
-  console.log(`[verify] ${mode.toUpperCase()} campaign=${campaignId} → 200 · scanned=${leads.length} valid=${valid} invalid=${invalid} warnings=${warningsCount} errors=${errors} suppressed=${suppressed} | invalid[${invSummary}] warnings[${warnSummary}]`)
+  console.log(`[verify] ${mode.toUpperCase()} campaign=${campaignId} -> 200 . scanned=${leads.length}/${totalPending} remaining=${remainingPending} valid=${valid} invalid=${invalid} warnings=${warningsCount} errors=${errors} suppressed=${suppressed} | invalid[${invSummary}] warnings[${warnSummary}]`)
+
+  if (remainingPending === 0) {
+    const { pushNotification } = await import('../lib/notifications')
+    await pushNotification({
+      type: 'system',
+      severity: invalid > 0 ? 'warning' : 'success',
+      title: `Email verification complete (${mode})`,
+      message: `${valid} valid . ${invalid} invalid . ${warningsCount} warnings . ${errors} errors . ${suppressed} suppressed out of ${totalPending} total.`,
+    }).catch(() => {})
+  }
 
   return c.json({
     ok: true,
     mode,
     scanned: leads.length,
-    totalPending, // remaining pending leads (including this batch) — frontend loops until 0
+    totalPending,
+    remainingPending,
     valid,
     invalid,
     warnings: warningsCount,
