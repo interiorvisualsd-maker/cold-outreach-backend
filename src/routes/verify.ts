@@ -30,6 +30,23 @@ interface VerifyJob {
 const verifyQueue: VerifyJob[] = []
 const VERIFY_BATCH_CONCURRENCY = parseInt(process.env.VERIFY_CONCURRENCY || '10')
 
+// In-memory tracking of the most recent verification job per owner.
+// Used by GET /api/verify/job-status so the frontend can show a progress
+// bar while verification is running. This is intentionally per-owner (not
+// global) so each user only sees their own jobs.
+interface JobTracker {
+  ownerId: string
+  running: boolean
+  campaignId: string | null
+  campaignName: string | null
+  method: 'quick' | 'deep' | null
+  total: number
+  processed: number
+  startedAt: string
+  finishedAt?: string
+}
+const jobTrackers = new Map<string, JobTracker>() // keyed by ownerId
+
 export function getQueuedVerificationCount(): number {
   return verifyQueue.length
 }
@@ -195,6 +212,18 @@ app.post('/campaign/:campaignId', async (c) => {
     }
   }
 
+  // Set the per-owner job tracker so the frontend can show a progress bar
+  jobTrackers.set(userId, {
+    ownerId: userId,
+    running: leads.length > 0,
+    campaignId,
+    campaignName: campaign.name,
+    method,
+    total: leads.length,
+    processed: 0,
+    startedAt: new Date().toISOString(),
+  })
+
   const jobId = `verify_${campaignId}_${Date.now()}`
   return c.json(
     {
@@ -209,8 +238,64 @@ app.post('/campaign/:campaignId', async (c) => {
   )
 })
 
+// GET /api/verify/job-status — returns the current verification job state for
+// the authenticated user. Used by the frontend to show a progress bar while
+// verification is running. Returns {running: false, ...} when no job is
+// active.
+app.get('/job-status', async (c) => {
+  const userId = getUserId(c)
+  const tracker = jobTrackers.get(userId)
+  if (!tracker) {
+    return c.json({
+      running: false,
+      campaignId: null,
+      campaignName: null,
+      method: null,
+      total: 0,
+      processed: 0,
+      startedAt: null,
+    })
+  }
+  // Update processed count from DB (count of leads no longer in VERIFYING
+  // state for this campaign since the job started). Cheaper than tracking
+  // per-lead in memory.
+  if (tracker.running && tracker.campaignId) {
+    try {
+      const stillVerifying = await db.lead.count({
+        where: {
+          campaignId: tracker.campaignId,
+          verificationStatus: 'VERIFYING',
+        },
+      })
+      tracker.processed = Math.max(0, tracker.total - stillVerifying)
+      // If queue is empty AND no leads are still VERIFYING, mark job done
+      if (verifyQueue.filter((j) => j.ownerId === userId).length === 0 && stillVerifying === 0) {
+        tracker.running = false
+        tracker.finishedAt = new Date().toISOString()
+      }
+    } catch {
+      // ignore — best-effort progress
+    }
+  }
+  return c.json({
+    running: tracker.running,
+    campaignId: tracker.campaignId,
+    campaignName: tracker.campaignName,
+    method: tracker.method,
+    total: tracker.total,
+    processed: tracker.processed,
+    startedAt: tracker.startedAt,
+    finishedAt: tracker.finishedAt || null,
+  })
+})
+
 // GET /api/verify/campaigns — list all campaigns with verification stats
 // (total leads, by status pending/verifying/verified/risky/bad).
+//
+// Returns the exact shape the frontend VerificationView expects:
+//   { campaigns: [{ campaignId, campaignName, totalLeads, verifiedCount,
+//                   verifyingCount, riskyCount, badCount, lastVerifiedAt }],
+//     totals: { totalLeads, verified, verifying, risky, bad } }
 app.get('/campaigns', async (c) => {
   const userId = getUserId(c)
   const campaigns = await db.campaign.findMany({
@@ -222,41 +307,62 @@ app.get('/campaigns', async (c) => {
       totalLeads: true,
       createdAt: true,
       leads: {
-        select: { verificationStatus: true },
+        select: { verificationStatus: true, verifiedAt: true },
+        orderBy: { verifiedAt: 'desc' },
+        take: 1, // we only need the most recent verifiedAt for lastVerifiedAt
       },
     },
     orderBy: { createdAt: 'desc' },
   })
 
+  // Also fetch full lead counts per campaign for accurate totals (the `take:1`
+  // above is only for lastVerifiedAt).
+  const campaignIds = campaigns.map((c) => c.id)
+  const counts = await db.lead.groupBy({
+    by: ['campaignId', 'verificationStatus'],
+    where: { campaignId: { in: campaignIds } },
+    _count: { _all: true },
+  })
+
+  // Build a lookup: { [campaignId]: { PENDING: n, VERIFIED: n, ... } }
+  const countMap: Record<string, Record<string, number>> = {}
+  for (const c of campaigns) countMap[c.id] = { PENDING: 0, VERIFYING: 0, VERIFIED: 0, RISKY: 0, BAD: 0 }
+  for (const row of counts) {
+    const status = row.verificationStatus || 'PENDING'
+    if (!countMap[row.campaignId]) countMap[row.campaignId] = { PENDING: 0, VERIFYING: 0, VERIFIED: 0, RISKY: 0, BAD: 0 }
+    countMap[row.campaignId][status] = row._count._all
+  }
+
+  const totals = { totalLeads: 0, verified: 0, verifying: 0, risky: 0, bad: 0 }
   const result = campaigns.map((camp) => {
-    const stats = {
-      pending: 0,
-      verifying: 0,
-      verified: 0,
-      risky: 0,
-      bad: 0,
-      total: camp.leads.length,
-    }
-    for (const l of camp.leads) {
-      const s = l.verificationStatus || 'PENDING'
-      if (s === 'PENDING' || s === '' || s == null) stats.pending++
-      else if (s === 'VERIFYING') stats.verifying++
-      else if (s === 'VERIFIED') stats.verified++
-      else if (s === 'RISKY') stats.risky++
-      else if (s === 'BAD') stats.bad++
-      else stats.pending++ // unknown → treat as pending
-    }
+    const stats = countMap[camp.id] || { PENDING: 0, VERIFYING: 0, VERIFIED: 0, RISKY: 0, BAD: 0 }
+    const verified = stats.VERIFIED || 0
+    const verifying = stats.VERIFYING || 0
+    const risky = stats.RISKY || 0
+    const bad = stats.BAD || 0
+    const totalLeads = camp.totalLeads || (verified + verifying + risky + bad + (stats.PENDING || 0))
+
+    totals.totalLeads += totalLeads
+    totals.verified += verified
+    totals.verifying += verifying
+    totals.risky += risky
+    totals.bad += bad
+
+    const lastVerifiedAt = camp.leads[0]?.verifiedAt || null
+
     return {
-      id: camp.id,
-      name: camp.name,
-      status: camp.status,
-      totalLeads: camp.totalLeads,
-      createdAt: camp.createdAt,
-      verificationStats: stats,
+      campaignId: camp.id,
+      campaignName: camp.name,
+      totalLeads,
+      verifiedCount: verified,
+      verifyingCount: verifying,
+      riskyCount: risky,
+      badCount: bad,
+      lastVerifiedAt: lastVerifiedAt ? lastVerifiedAt.toISOString() : null,
     }
   })
 
-  return c.json({ campaigns: result })
+  return c.json({ campaigns: result, totals })
 })
 
 // GET /api/verify/campaigns/:campaignId/leads — paginated list of leads in a
@@ -311,9 +417,63 @@ app.get('/campaigns/:campaignId/leads', async (c) => {
     db.lead.count({ where }),
   ])
 
+  // ─── Map raw DB rows to the frontend's expected VerifyLeadRow shape ───
+  // The frontend expects a flat `checks` object with boolean fields and a
+  // top-level `verificationScore`. The DB stores `verificationResults` as a
+  // raw JSON object (the full VerificationResult from emailVerify.ts) which
+  // has a nested `layers` structure. We normalize here so the frontend
+  // doesn't have to know about the internal shape and can't crash on
+  // unverified leads (where verificationResults is null).
+  type RawLayer = { ok?: boolean; detected?: boolean; status?: string }
+  type RawVerificationResults = {
+    score?: number
+    method?: string
+    layers?: {
+      syntax?: RawLayer
+      domain?: RawLayer
+      mx?: RawLayer & { hosts?: string[] }
+      smtp?: RawLayer
+      disposable?: boolean
+      role?: boolean
+      free?: boolean
+      catchAll?: boolean
+      typo?: RawLayer
+    }
+    reason?: string
+  } | null
+
+  const mappedLeads = leads.map((lead) => {
+    const vr = (lead.verificationResults as RawVerificationResults) || null
+    const layers = vr?.layers
+    const lowerStatus = (lead.verificationStatus || 'PENDING').toLowerCase()
+    return {
+      id: lead.id,
+      email: lead.email,
+      companyName: lead.companyName,
+      status: lead.status,
+      // Normalize status to lowercase to match the frontend's VerificationStatus union
+      verificationStatus: lowerStatus,
+      verificationMethod: lead.verificationMode || vr?.method || null,
+      verificationScore: typeof vr?.score === 'number' ? vr.score : null,
+      verifiedAt: lead.verifiedAt ? lead.verifiedAt.toISOString() : null,
+      checks: {
+        syntax: layers?.syntax?.ok,
+        domain: layers?.domain?.ok,
+        mx: layers?.mx?.ok,
+        smtp: layers?.smtp?.ok,
+        disposable: layers?.disposable === true ? true : layers?.disposable === false ? false : undefined,
+        role: layers?.role === true ? true : layers?.role === false ? false : undefined,
+        free: layers?.free === true ? true : layers?.free === false ? false : undefined,
+        catchAll: layers?.catchAll === true ? true : layers?.catchAll === false ? false : undefined,
+        typo: layers?.typo?.detected === true ? true : layers?.typo?.detected === false ? false : undefined,
+      },
+      failureReason: lead.verificationReason || vr?.reason || null,
+    }
+  })
+
   return c.json({
     campaign: { id: campaign.id, name: campaign.name },
-    leads,
+    leads: mappedLeads,
     total,
     page,
     limit,
