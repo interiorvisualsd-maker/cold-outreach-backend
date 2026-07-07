@@ -21,14 +21,14 @@
 // ─────────────────────────────────────────────────────────────────────────
 // | Provider                | Free/mo  | Reset   | Unknown free? |
 // |-------------------------|----------|---------|---------------|
-// | BillionVerify           | 3,000    | Daily   | ✅ Yes         |
-// | QuickEmailVerification  | 3,000    | Daily   | ✅ Yes         |
-// | MyEmailVerifier         | 3,000    | Daily   | ❌ Charged     |
+// | BillionVerify            | (removed — requires credit card)
+// | QuickEmailVerification   | (removed — requires credit card for credits)
+// | Verifalia                | (removed — per user request)
+// | MyEmailVerifier          | 3,000    | Daily   | ❌ Charged     |
 // | EmailAwesome            | 1,000    | Monthly | ✅ Yes         |
-// | Verifalia               | 750      | Daily   | ❌ Charged     |
 // | Reoon                   | 600      | Monthly | ❌ Charged     |
 // | MailboxValidator        | 300      | Monthly | ❌ Charged     |
-// | TOTAL                   | ~11,950  |         |               |
+// | TOTAL                   | ~4,900   |         |               |
 //
 // With pre-filtering (syntax + DNS + MX + disposable + typo removes ~40%
 // before SMTP), this covers ~20,000 raw emails/month for $0.
@@ -68,11 +68,8 @@ import { db } from './db'
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type ProviderId =
-  | 'billionverify'
-  | 'quickemailverification'
   | 'myemailverifier'
   | 'emailawesome'
-  | 'verifalia'
   | 'reoon'
   | 'mailboxvalidator'
   | 'flyio'
@@ -99,41 +96,17 @@ interface ProviderConfig {
 }
 
 export const PROVIDER_CONFIG: Record<ProviderId, ProviderConfig> = {
-  billionverify: {
-    id: 'billionverify',
-    label: 'BillionVerify',
-    freeLimit: 3000, // 100/day
-    quotaType: 'DAILY',
-    unknownFree: true,
-    priority: 1,
-    maxConcurrency: 10,
-    envVarName: 'BILLIONVERIFY_API_KEY',
-    signupUrl: 'https://billionverify.com',
-    docsUrl: 'https://billionverify.com/docs/api-reference',
-  },
-  quickemailverification: {
-    id: 'quickemailverification',
-    label: 'QuickEmailVerification',
-    freeLimit: 3000, // 100/day
-    quotaType: 'DAILY',
-    unknownFree: true,
-    priority: 2,
-    maxConcurrency: 5,
-    envVarName: 'QUICKEMAILVERIFICATION_API_KEY',
-    signupUrl: 'https://quickemailverification.com',
-    docsUrl: 'https://quickemailverification.com/email-verification-api',
-  },
   emailawesome: {
     id: 'emailawesome',
     label: 'EmailAwesome',
     freeLimit: 1000, // monthly
     quotaType: 'MONTHLY',
     unknownFree: true,
-    priority: 3,
+    priority: 1,
     maxConcurrency: 5,
     envVarName: 'EMAILAWESOME_API_KEY',
     signupUrl: 'https://emailawesome.com',
-    docsUrl: 'https://emailawesome.com/docs',
+    docsUrl: 'https://developers.emailawesome.com/docs/validation-api',
   },
   myemailverifier: {
     id: 'myemailverifier',
@@ -141,23 +114,11 @@ export const PROVIDER_CONFIG: Record<ProviderId, ProviderConfig> = {
     freeLimit: 3000, // 100/day
     quotaType: 'DAILY',
     unknownFree: false,
-    priority: 4,
+    priority: 2,
     maxConcurrency: 5,
     envVarName: 'MYEMAILVERIFIER_API_KEY',
     signupUrl: 'https://myemailverifier.com',
     docsUrl: 'https://myemailverifier.com/real-time-email-verification',
-  },
-  verifalia: {
-    id: 'verifalia',
-    label: 'Verifalia',
-    freeLimit: 750, // 25/day
-    quotaType: 'DAILY',
-    unknownFree: false,
-    priority: 5,
-    maxConcurrency: 1,
-    envVarName: 'VERIFALIA_API_KEY',
-    signupUrl: 'https://verifalia.com',
-    docsUrl: 'https://verifalia.com/api',
   },
   reoon: {
     id: 'reoon',
@@ -165,7 +126,7 @@ export const PROVIDER_CONFIG: Record<ProviderId, ProviderConfig> = {
     freeLimit: 600, // monthly
     quotaType: 'MONTHLY',
     unknownFree: false,
-    priority: 6,
+    priority: 3,
     maxConcurrency: 5,
     envVarName: 'REOON_API_KEY',
     signupUrl: 'https://emailverifier.reoon.com',
@@ -177,11 +138,11 @@ export const PROVIDER_CONFIG: Record<ProviderId, ProviderConfig> = {
     freeLimit: 300, // monthly
     quotaType: 'MONTHLY',
     unknownFree: false,
-    priority: 7,
+    priority: 4,
     maxConcurrency: 3,
     envVarName: 'MAILBOXVALIDATOR_API_KEY',
     signupUrl: 'https://www.mailboxvalidator.com',
-    docsUrl: 'https://www.mailboxvalidator.com/api-email-validation',
+    docsUrl: 'https://www.mailboxvalidator.com/api-single-validation',
   },
   flyio: {
     id: 'flyio',
@@ -394,163 +355,99 @@ async function recordProviderError(
 // Returns our canonical SmtpVerifyResult shape so the caller doesn't care
 // which provider was used.
 
-async function verifyBillionVerify(email: string, apiKey: string, signal: AbortSignal): Promise<SmtpVerifyResult> {
-  const res = await fetch('https://api.billionverify.com/v1/verify/single', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'BV-API-KEY': apiKey,
-    },
-    body: JSON.stringify({ email, check_smtp: true }),
-    signal,
-  })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`BillionVerify ${res.status}: ${text}`)
-  }
-  const data: any = await res.json()
-  // BV returns: { status: "valid"|"invalid"|"unknown"|"catch_all", ... }
-  const status = data.status?.toLowerCase()
-  return {
-    status: status === 'catch_all' ? 'catch-all' : status,
-    response: data.reason || data.smtp_response,
-    details: `BillionVerify: ${data.status}${data.smtp_response ? ` (${data.smtp_response})` : ''}`,
-  }
-}
-
-async function verifyQuickEmailVerification(email: string, apiKey: string, signal: AbortSignal): Promise<SmtpVerifyResult> {
-  const url = `https://api.quickemailverification.com/v1/verify?email=${encodeURIComponent(email)}&apikey=${encodeURIComponent(apiKey)}`
-  const res = await fetch(url, { signal })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`QuickEmailVerification ${res.status}: ${text}`)
-  }
-  const data: any = await res.json()
-  // QEV returns: { safe_to_send: "true"|"false", accept_all: "true"|"false", result: "valid"|"invalid"|"unknown", ... }
-  if (data.result === 'valid') {
-    return {
-      status: data.accept_all === 'true' ? 'catch-all' : 'valid',
-      response: data.reason,
-      details: `QuickEmailVerification: valid${data.reason ? ` (${data.reason})` : ''}`,
-    }
-  } else if (data.result === 'invalid') {
-    return {
-      status: 'invalid',
-      response: data.reason,
-      details: `QuickEmailVerification: invalid${data.reason ? ` (${data.reason})` : ''}`,
-    }
-  } else {
-    return {
-      status: 'unknown',
-      response: data.reason,
-      details: `QuickEmailVerification: ${data.result || 'unknown'}`,
-    }
-  }
-}
-
 async function verifyMyEmailVerifier(email: string, apiKey: string, signal: AbortSignal): Promise<SmtpVerifyResult> {
-  const url = `https://client.myemailverifier.com/verifier/validate_single/${encodeURIComponent(email)}/${encodeURIComponent(apiKey)}`
+  // MyEmailVerifier API — using the recommended api.myemailverifier.com endpoint
+  // Docs: https://myemailverifier.com/real-time-email-verification
+  // Response: { Status: "Valid"|"Invalid"|"Unknown"|"Catch All"|"Grey-listed", catch_all: "true"|"false", ... }
+  // Note: values are STRINGS ("true"/"false"), not booleans
+  const url = `https://api.myemailverifier.com/api/validate_single.php?apikey=${encodeURIComponent(apiKey)}&email=${encodeURIComponent(email)}`
   const res = await fetch(url, { signal })
   if (!res.ok) {
     const text = await res.text().catch(() => '')
     throw new Error(`MyEmailVerifier ${res.status}: ${text}`)
   }
   const data: any = await res.json()
-  // MEV returns: { Status: "Valid"|"Invalid"|"Unknown"|"CatchAll", ... } (PascalCase)
+  // MEV returns PascalCase fields. Status values: "Valid"|"Invalid"|"Unknown"|"Catch All"|"Grey-listed"
   const status = (data.Status || data.status || '').toLowerCase()
   if (status === 'valid') {
-    return { status: 'valid', response: data.Reason, details: `MyEmailVerifier: valid` }
+    return { status: 'valid', response: data.Diagnosis || data.Reason, details: `MyEmailVerifier: valid` }
   } else if (status === 'invalid') {
-    return { status: 'invalid', response: data.Reason, details: `MyEmailVerifier: invalid` }
-  } else if (status === 'catchall' || status === 'catch_all' || status === 'catch-all') {
-    return { status: 'catch-all', response: data.Reason, details: `MyEmailVerifier: catch-all` }
+    return { status: 'invalid', response: data.Diagnosis || data.Reason, details: `MyEmailVerifier: invalid` }
+  } else if (status === 'catch all' || status === 'catchall' || status === 'catch_all' || status === 'catch-all') {
+    return { status: 'catch-all', response: data.Diagnosis || data.Reason, details: `MyEmailVerifier: catch-all` }
+  } else if (status === 'grey-listed' || status === 'greylisted') {
+    return { status: 'unknown', response: data.Diagnosis || data.Reason, details: `MyEmailVerifier: greylisted` }
   } else {
-    return { status: 'unknown', response: data.Reason, details: `MyEmailVerifier: ${status || 'unknown'}` }
+    return { status: 'unknown', response: data.Diagnosis || data.Reason, details: `MyEmailVerifier: ${status || 'unknown'}` }
   }
 }
 
 async function verifyEmailAwesome(email: string, apiKey: string, signal: AbortSignal): Promise<SmtpVerifyResult> {
-  // EmailAwesome uses an async API — submit + poll. We use a simplified sync
-  // endpoint if available, otherwise poll with a timeout.
-  const res = await fetch('https://api.emailawesome.com/v1/verify', {
+  // EmailAwesome uses an ASYNC 2-step API (create validation → poll for result)
+  // Docs: https://developers.emailawesome.com/docs/validation-api
+  // Auth: x-api-key header (NOT Bearer)
+  // Step 1: POST /api/validations/email_validation → returns { id, status: "PENDING" }
+  // Step 2: GET /api/validations/email_validation/{id} → poll until status == "COMPLETE"
+  //   email_address_status: "VALID"|"INVALID"|"UNKNOWN"|"CATCH_ALL"
+
+  // Step 1 — create validation
+  const createRes = await fetch('https://api.emailawesome.com/api/validations/email_validation', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
+      'Accept': 'application/json',
+      'x-api-key': apiKey,
     },
     body: JSON.stringify({ email }),
     signal,
   })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`EmailAwesome ${res.status}: ${text}`)
+  if (!createRes.ok) {
+    const text = await createRes.text().catch(() => '')
+    throw new Error(`EmailAwesome create ${createRes.status}: ${text}`)
   }
-  const data: any = await res.json()
-  // EmailAwesome returns: { status: "valid"|"invalid"|"unknown"|"catch_all", ... }
-  const status = (data.status || data.result || '').toLowerCase()
-  if (status === 'valid' || status === 'deliverable') {
-    return { status: data.catch_all ? 'catch-all' : 'valid', response: data.reason, details: `EmailAwesome: valid` }
-  } else if (status === 'invalid' || status === 'undeliverable') {
-    return { status: 'invalid', response: data.reason, details: `EmailAwesome: invalid` }
-  } else if (status === 'catch_all' || status === 'catch-all') {
-    return { status: 'catch-all', response: data.reason, details: `EmailAwesome: catch-all` }
-  } else {
-    return { status: 'unknown', response: data.reason, details: `EmailAwesome: ${status || 'unknown'}` }
+  const createData: any = await createRes.json()
+  const validationId = createData.id
+  if (!validationId) {
+    throw new Error('EmailAwesome: no validation ID returned')
   }
-}
 
-async function verifyVerifalia(email: string, apiKey: string, signal: AbortSignal): Promise<SmtpVerifyResult> {
-  // Verifalia is async: submit job → poll until done. We use a 30s overall timeout.
-  // Auth: Verifalia uses basic auth with username = API key, password = empty.
-  const authHeader = 'Basic ' + Buffer.from(`${apiKey}:`).toString('base64')
-
-  // Submit
-  const submitRes = await fetch('https://api.verifalia.com/v2/email-validations', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': authHeader,
-    },
-    body: JSON.stringify({ entries: [{ inputData: email }], quality: 'Standard' }),
-    signal,
-  })
-  if (!submitRes.ok) {
-    const text = await submitRes.text().catch(() => '')
-    throw new Error(`Verifalia submit ${submitRes.status}: ${text}`)
-  }
-  const submitData: any = await submitRes.json()
-  const jobId = submitData.id
-  if (!jobId) throw new Error('Verifalia: no job ID returned')
-
-  // Poll (max 6 attempts × 5s = 30s)
-  for (let i = 0; i < 6; i++) {
-    await new Promise((r) => setTimeout(r, 5000))
-    const pollRes = await fetch(`https://api.verifalia.com/v2/email-validations/${jobId}`, {
-      headers: { 'Authorization': authHeader },
+  // Step 2 — poll for result (max 8 attempts × 3s = 24s)
+  for (let i = 0; i < 8; i++) {
+    await new Promise((r) => setTimeout(r, 3000))
+    const pollRes = await fetch(`https://api.emailawesome.com/api/validations/email_validation/${validationId}`, {
+      headers: {
+        'Accept': 'application/json',
+        'x-api-key': apiKey,
+      },
       signal,
     })
     if (!pollRes.ok) continue
     const pollData: any = await pollRes.json()
-    if (pollData.status === 'completed') {
-      const entry = pollData.entries?.[0]
-      if (!entry) return { status: 'unknown', details: 'Verifalia: no entry' }
-      const classification = (entry.classification || '').toLowerCase()
-      if (classification === 'delivered') {
-        return { status: entry.isCatchAll ? 'catch-all' : 'valid', response: entry.status, details: `Verifalia: delivered` }
-      } else if (classification === 'undeliverable') {
-        return { status: 'invalid', response: entry.status, details: `Verifalia: undeliverable` }
-      } else if (classification === 'risky') {
-        return { status: entry.isCatchAll ? 'catch-all' : 'unknown', response: entry.status, details: `Verifalia: risky` }
+    if (pollData.status === 'COMPLETE') {
+      const emailStatus = (pollData.email_address_status || '').toUpperCase()
+      if (emailStatus === 'VALID') {
+        return { status: 'valid', response: pollData.status, details: `EmailAwesome: VALID` }
+      } else if (emailStatus === 'INVALID') {
+        return { status: 'invalid', response: pollData.status, details: `EmailAwesome: INVALID` }
+      } else if (emailStatus === 'CATCH_ALL' || emailStatus === 'CATCH-ALL') {
+        return { status: 'catch-all', response: pollData.status, details: `EmailAwesome: CATCH_ALL` }
       } else {
-        return { status: 'unknown', response: entry.status, details: `Verifalia: ${classification}` }
+        return { status: 'unknown', response: pollData.status, details: `EmailAwesome: ${emailStatus || 'UNKNOWN'}` }
       }
     }
-    // Still pending — keep polling
+    if (pollData.status === 'FAILED') {
+      return { status: 'unknown', response: pollData.status, details: `EmailAwesome: FAILED` }
+    }
+    // Still PENDING or IN-PROGRESS — keep polling
   }
-  return { status: 'unknown', details: 'Verifalia: timed out waiting for result' }
+  return { status: 'unknown', details: 'EmailAwesome: timed out waiting for result' }
 }
 
 async function verifyReoon(email: string, apiKey: string, signal: AbortSignal): Promise<SmtpVerifyResult> {
+  // Reoon Power Mode — real SMTP mailbox verification
+  // Docs: https://www.reoon.com/articles/api-documentation-of-reoon-email-verifier
+  // Power mode status values: "safe"|"invalid"|"disabled"|"disposable"|"inbox_full"|"catch_all"|"role_account"|"spamtrap"|"unknown"
+  // Quick mode status values: "valid"|"invalid"|"disposable"|"spamtrap" (different!)
   const url = `https://emailverifier.reoon.com/api/v1/verify?email=${encodeURIComponent(email)}&key=${encodeURIComponent(apiKey)}&mode=power`
   const res = await fetch(url, { signal })
   if (!res.ok) {
@@ -558,34 +455,46 @@ async function verifyReoon(email: string, apiKey: string, signal: AbortSignal): 
     throw new Error(`Reoon ${res.status}: ${text}`)
   }
   const data: any = await res.json()
-  // Reoon Power Mode returns: { status: "valid"|"invalid"|"catch_all"|"unknown"|"risky", ... }
   const status = (data.status || '').toLowerCase()
-  if (status === 'valid' || status === 'safe') {
-    return { status: data.is_catch_all ? 'catch-all' : 'valid', response: data.smtp_response, details: `Reoon: valid` }
+  // Power mode: "safe" = deliverable, "invalid"/"disabled" = mailbox doesn't exist
+  if (status === 'safe' || status === 'valid') {
+    return { status: data.is_catch_all ? 'catch-all' : 'valid', response: data.smtp_response, details: `Reoon: safe` }
   } else if (status === 'invalid' || status === 'disabled') {
     return { status: 'invalid', response: data.smtp_response, details: `Reoon: invalid` }
   } else if (status === 'catch_all' || status === 'catch-all') {
     return { status: 'catch-all', response: data.smtp_response, details: `Reoon: catch-all` }
+  } else if (status === 'inbox_full') {
+    return { status: 'valid', response: data.smtp_response, details: `Reoon: inbox_full (mailbox exists)` }
+  } else if (status === 'disposable' || status === 'spamtrap') {
+    return { status: 'invalid', response: data.smtp_response, details: `Reoon: ${status}` }
   } else {
     return { status: 'unknown', response: data.smtp_response, details: `Reoon: ${status || 'unknown'}` }
   }
 }
 
 async function verifyMailboxValidator(email: string, apiKey: string, signal: AbortSignal): Promise<SmtpVerifyResult> {
-  const url = `https://api.mailboxvalidator.com/v2/validation?email=${encodeURIComponent(email)}&key=${encodeURIComponent(apiKey)}&format=json`
+  // MailboxValidator — CORRECT endpoint is /v2/validation/single (not /v2/validation)
+  // Docs: https://www.mailboxvalidator.com/api-single-validation
+  // Response: { status: true|false|null, is_catchall: true|false|null, is_verified: true|false|null, ... }
+  // Error: { error: { error_code: 10001, error_message: "API key not found." } }
+  const url = `https://api.mailboxvalidator.com/v2/validation/single?key=${encodeURIComponent(apiKey)}&email=${encodeURIComponent(email)}&format=json`
   const res = await fetch(url, { signal })
   if (!res.ok) {
     const text = await res.text().catch(() => '')
     throw new Error(`MailboxValidator ${res.status}: ${text}`)
   }
   const data: any = await res.json()
-  // MBV returns: { status: "True"|"False"|"Unknown", is_catch_all: "True"|"False", ... } (string booleans)
-  if (data.status === 'True') {
-    return { status: data.is_catch_all === 'True' ? 'catch-all' : 'valid', response: data.error_message, details: `MailboxValidator: valid` }
-  } else if (data.status === 'False') {
-    return { status: 'invalid', response: data.error_message, details: `MailboxValidator: invalid` }
+  // Check for error response
+  if (data.error) {
+    throw new Error(`MailboxValidator: ${data.error.error_message || 'API error'}`)
+  }
+  // MBV returns: status (boolean), is_catchall (boolean|null), is_verified (boolean|null)
+  if (data.status === true) {
+    return { status: data.is_catchall === true ? 'catch-all' : 'valid', response: data.mailboxvalidator_score?.toString(), details: `MailboxValidator: valid` }
+  } else if (data.status === false) {
+    return { status: 'invalid', response: data.mailboxvalidator_score?.toString(), details: `MailboxValidator: invalid` }
   } else {
-    return { status: 'unknown', response: data.error_message, details: `MailboxValidator: unknown` }
+    return { status: 'unknown', response: data.mailboxvalidator_score?.toString(), details: `MailboxValidator: unknown` }
   }
 }
 
@@ -627,11 +536,8 @@ interface RouterResult extends SmtpVerifyResult {
 }
 
 const PROVIDER_ADAPTERS: Record<ProviderId, (email: string, apiKey: string, signal: AbortSignal) => Promise<SmtpVerifyResult>> = {
-  billionverify: verifyBillionVerify,
-  quickemailverification: verifyQuickEmailVerification,
   myemailverifier: verifyMyEmailVerifier,
   emailawesome: verifyEmailAwesome,
-  verifalia: verifyVerifalia,
   reoon: verifyReoon,
   mailboxvalidator: verifyMailboxValidator,
   flyio: verifyFlyIoProxy,
@@ -703,8 +609,8 @@ export async function verifyViaApi(email: string, userId?: string): Promise<Rout
 
     // Call the provider
     const controller = new AbortController()
-    // Verifalia is slow (async polling) — give it 45s. Fly.io proxy 20s. Others 15s.
-    const timeoutMs = provider === 'verifalia' ? 45_000 : provider === 'flyio' ? 20_000 : 15_000
+    // EmailAwesome is slow (async 2-step polling) — give it 45s. Fly.io proxy 20s. Others 15s.
+    const timeoutMs = provider === 'emailawesome' ? 45_000 : provider === 'flyio' ? 20_000 : 15_000
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
 
     try {
