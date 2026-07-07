@@ -1,6 +1,22 @@
-# SMTP Verification Proxy — 100% Free Solution
+# SMTP Verification Proxy — Self-Hosted on Fly.io
 
-This is a tiny SMTP verification proxy that runs on **Fly.io's free tier**. It solves the problem of Render blocking outbound port 25 (which makes direct SMTP mailbox verification impossible from Render).
+This is a tiny SMTP verification proxy that runs on **Fly.io**. It solves the problem of Render blocking outbound port 25 (which makes direct SMTP mailbox verification impossible from Render).
+
+## ⚠️ Pricing Update (read first)
+
+Fly.io **no longer offers a true free tier**. Their current model is "Pay As You Go":
+- **$5 free credit** for new accounts (covers ~2-3 months of proxy usage)
+- After that: **~$2/month** for a tiny VM (shared-cpu-1x, 256MB RAM)
+- They require a credit card to verify you're human (won't be charged within the credit)
+
+This is still very cheap (~$24/year) and gives you **unlimited** SMTP verifications.
+
+**If you want truly free**: use the **Reoon API** option instead (set `EMAIL_VERIFY_PROVIDER=reoon` on Render). Reoon gives 100 verifications/day free forever (~3,000/month) with no credit card. See the main `.env.example` for details.
+
+**This proxy remains useful if:**
+- You verify more than 3,000 leads/month regularly
+- You want zero dependency on third-party APIs
+- You're comfortable with ~$2/month for unlimited verifications
 
 ## How it works
 
@@ -11,14 +27,17 @@ Your app (Render)  ──HTTPS──►  SMTP Proxy (Fly.io)  ──port 25─�
 
 The proxy is a ~200-line Node.js server with zero npm dependencies. It receives HTTPS requests from your main backend, does the real SMTP RCPT TO check on port 25, and returns the result.
 
-## Cost: $0 forever
+## Cost: ~$2/month (after $5 free credit)
 
-Fly.io's free tier includes:
-- **3 shared-cpu-1x VMs** (256MB RAM each) — this proxy uses 1
-- **160GB outbound data/month** — plenty (each verify request is ~1KB)
-- **No credit card charge** as long as you stay within free tier
+Fly.io's Pay-As-You-Go plan includes:
+- **$5 free credit** for new accounts (covers ~2-3 months)
+- **shared-cpu-1x VM** with 256MB RAM: ~$1.94/month
+- **160GB outbound data/month** included (each verify request is ~1KB — negligible)
+- **Credit card required** for verification (won't be charged within the credit)
 
 The only effective limit is SMTP server rate limits (~1-2 requests/sec per MX host), not Fly.io.
+
+**For truly free**: use Reoon API instead (`EMAIL_VERIFY_PROVIDER=reoon` on Render — 100/day free forever).
 
 ## Setup (browser-only, ~10 minutes, no terminal)
 
@@ -127,14 +146,15 @@ If ALL leads show "—" for SMTP, check:
 2. Did you set `SMTP_PROXY_URL` and `SMTP_PROXY_SECRET` on Render?
 3. Check Render logs for `[verify] proxy error:` messages
 
-## Free tier limits
+## Limits
 
-| Resource | Free tier | This proxy uses |
+| Resource | Pay-As-You-Go | This proxy uses |
 |---|---|---|
-| VMs | 3 shared-cpu-1x | 1 |
-| RAM | 256MB per VM | ~50MB |
-| Outbound data | 160GB/month | ~1KB per verify (negligible) |
+| VMs | unlimited (billed per use) | 1 |
+| RAM | 256MB (shared-cpu-1x) | ~50MB |
+| Outbound data | 160GB/month included | ~1KB per verify (negligible) |
 | SMTP rate limit | ~1-2 req/sec per MX host | — |
+| Monthly cost | ~$2/month (after $5 free credit) | — |
 
 **Effective capacity**: ~3,000-7,000 verifications per hour. For 10,000 leads, expect ~2-3 hours total.
 

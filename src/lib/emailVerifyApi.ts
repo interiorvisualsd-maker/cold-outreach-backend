@@ -9,21 +9,26 @@
 //
 // SOLUTIONS SUPPORTED (pick one — all configured via env vars):
 //
-//   1. SELF-HOSTED PROXY (100% FREE) — recommended for open-source users
-//      Deploy the smtp-proxy/ service on Fly.io (free tier, port 25 allowed).
-//      The main backend calls your proxy via HTTPS.
+//   1. REOON API (FREE — 100 verifications/day = ~3000/month) — BEST FREE OPTION
+//      Real SMTP mailbox check via their API. No credit card needed.
+//      Sign up at https://reoon.com — get API key from dashboard
+//      Env vars: EMAIL_VERIFY_PROVIDER=reoon + EMAIL_VERIFY_API_KEY=<key>
+//
+//   2. SELF-HOSTED PROXY ON FLY.IO (~$2/month after $5 free credit)
+//      Deploy the smtp-proxy/ service on Fly.io. Port 25 allowed.
+//      Your main backend calls the proxy via HTTPS.
 //      Env vars: SMTP_PROXY_URL + SMTP_PROXY_SECRET
 //      See smtp-proxy/README.md for setup.
 //
-//   2. THIRD-PARTY API (paid) — for users who don't want to self-host
+//   3. OTHER PAID APIs — for users who want higher volume
 //      Kickbox ($0.005/email)     → EMAIL_VERIFY_PROVIDER=kickbox
 //      ZeroBounce ($0.006/email)  → EMAIL_VERIFY_PROVIDER=zerobounce
 //      Abstract API ($0.009/email)→ EMAIL_VERIFY_PROVIDER=abstract
 //      Env vars: EMAIL_VERIFY_PROVIDER + EMAIL_VERIFY_API_KEY
 //
 // PRIORITY ORDER (when multiple are configured):
-//   1. SMTP_PROXY_URL (self-hosted, free) — checked first
-//   2. EMAIL_VERIFY_PROVIDER (third-party, paid) — fallback
+//   1. SMTP_PROXY_URL (self-hosted proxy) — checked first
+//   2. EMAIL_VERIFY_PROVIDER (third-party API: reoon, kickbox, etc.)
 //   3. Direct SMTP (only works on hosts that allow port 25 — NOT Render)
 //
 // If nothing is configured, the caller falls back to direct SMTP which will
@@ -73,13 +78,17 @@ export async function verifyViaApi(email: string): Promise<SmtpVerifyResult> {
     }
   }
 
-  // ─── Priority 2: Third-party API (paid) ───
+  // ─── Priority 2: Third-party API (reoon, kickbox, zerobounce, abstract) ───
   const provider = getProvider()
   if (provider) {
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 15_000)
+    // Reoon can take up to 30s for deep SMTP checks — others are fast
+    const timeoutMs = provider === 'reoon' ? 30_000 : 15_000
+    const timeout = setTimeout(() => controller.abort(), timeoutMs)
     try {
-      if (provider === 'kickbox') {
+      if (provider === 'reoon') {
+        return await verifyReoon(email, controller.signal)
+      } else if (provider === 'kickbox') {
         return await verifyKickbox(email, controller.signal)
       } else if (provider === 'zerobounce') {
         return await verifyZeroBounce(email, controller.signal)
@@ -138,6 +147,79 @@ async function verifyViaProxy(email: string, proxyUrl: string, secret: string): 
     }
   } finally {
     clearTimeout(timeout)
+  }
+}
+
+// ─── Reoon API (FREE — 100 verifications/day = ~3000/month) ──────────────────
+// Docs: https://docs.reoon.com/
+// Sign up at https://reoon.com — free plan, no credit card required.
+//
+// Reoon's "Power Verifier" mode does real SMTP mailbox verification. Their
+// API is asynchronous — you submit an email, then poll for the result. We
+// use the synchronous endpoint with a 30s timeout.
+//
+// Response shape (from /api/v1/verify):
+//   {
+//     "status": "valid" | "invalid" | "catch_all" | "unknown" | "risky",
+//     "email": "...",
+//     "did_you_mean": "",
+//     "is_disposable": false,
+//     "is_role_account": false,
+//     "is_free_email": true,
+//     "mx_record": "aspmx.l.google.com",
+//     "smtp_server": "gmail-smtp-in.l.google.com",
+//     "smtp_response": "250 OK"
+//   }
+async function verifyReoon(email: string, signal: AbortSignal): Promise<SmtpVerifyResult> {
+  const apiKey = process.env.EMAIL_VERIFY_API_KEY!
+  // Reoon synchronous verify endpoint — waits for the result (up to 30s)
+  const url = `https://reoon.com/api/v1/verify?email=${encodeURIComponent(email)}&key=${encodeURIComponent(apiKey)}&mode=power`
+  const res = await fetch(url, { signal })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    if (res.status === 429) {
+      throw new Error('Reoon free tier limit reached (100/day). Try again tomorrow or upgrade.')
+    }
+    throw new Error(`Reoon API ${res.status}: ${text}`)
+  }
+  const data: any = await res.json()
+
+  // Map Reoon status → our SmtpVerifyResult
+  //   valid     → SMTP 250 confirmed → 'valid'
+  //   invalid   → SMTP 550 (mailbox doesn't exist) → 'invalid'
+  //   catch_all → domain accepts everything → 'catch-all'
+  //   risky     → greylisting or temporary failure → 'unknown'
+  //   unknown   → couldn't verify → 'unknown'
+  if (data.status === 'valid') {
+    return {
+      status: 'valid',
+      response: data.smtp_response,
+      details: `Reoon: valid${data.smtp_response ? ` (${data.smtp_response})` : ''}`,
+    }
+  } else if (data.status === 'invalid') {
+    return {
+      status: 'invalid',
+      response: data.smtp_response,
+      details: `Reoon: invalid${data.smtp_response ? ` (${data.smtp_response})` : ''}`,
+    }
+  } else if (data.status === 'catch_all') {
+    return {
+      status: 'catch-all',
+      response: data.smtp_response,
+      details: `Reoon: catch-all domain`,
+    }
+  } else if (data.status === 'risky') {
+    return {
+      status: 'unknown',
+      response: data.smtp_response,
+      details: `Reoon: risky (${data.smtp_response || 'greylisting'})`,
+    }
+  } else {
+    return {
+      status: 'unknown',
+      response: data.smtp_response,
+      details: `Reoon: ${data.status || 'unknown'}`,
+    }
   }
 }
 
