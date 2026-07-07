@@ -7,24 +7,36 @@
 // port 25 to prevent spam. Direct SMTP mailbox verification (RCPT TO probe)
 // requires port 25, so it's impossible from these hosts.
 //
-// SOLUTION:
-// Use a third-party email verification API. These services run their own
-// infrastructure with port 25 unblocked, perform the real SMTP mailbox
-// check, and return the result via HTTPS. Cost is ~$5-9 per 1,000 emails.
+// SOLUTIONS SUPPORTED (pick one — all configured via env vars):
 //
-// SUPPORTED PROVIDERS:
-//   1. Kickbox     — $0.005/email, free 100/month  → EMAIL_VERIFY_PROVIDER=kickbox
-//   2. ZeroBounce  — $0.006/email, free 100/month  → EMAIL_VERIFY_PROVIDER=zerobounce
-//   3. Abstract API — $0.009/email, free 100/month → EMAIL_VERIFY_PROVIDER=abstract
+//   1. SELF-HOSTED PROXY (100% FREE) — recommended for open-source users
+//      Deploy the smtp-proxy/ service on Fly.io (free tier, port 25 allowed).
+//      The main backend calls your proxy via HTTPS.
+//      Env vars: SMTP_PROXY_URL + SMTP_PROXY_SECRET
+//      See smtp-proxy/README.md for setup.
 //
-// ENV VARS:
-//   EMAIL_VERIFY_PROVIDER  = kickbox | zerobounce | abstract | (empty for direct SMTP)
-//   EMAIL_VERIFY_API_KEY   = your API key from the provider
+//   2. THIRD-PARTY API (paid) — for users who don't want to self-host
+//      Kickbox ($0.005/email)     → EMAIL_VERIFY_PROVIDER=kickbox
+//      ZeroBounce ($0.006/email)  → EMAIL_VERIFY_PROVIDER=zerobounce
+//      Abstract API ($0.009/email)→ EMAIL_VERIFY_PROVIDER=abstract
+//      Env vars: EMAIL_VERIFY_PROVIDER + EMAIL_VERIFY_API_KEY
 //
-// If EMAIL_VERIFY_PROVIDER is empty/unset, the caller falls back to direct
-// SMTP (only works on hosts that allow port 25 — Render does NOT).
+// PRIORITY ORDER (when multiple are configured):
+//   1. SMTP_PROXY_URL (self-hosted, free) — checked first
+//   2. EMAIL_VERIFY_PROVIDER (third-party, paid) — fallback
+//   3. Direct SMTP (only works on hosts that allow port 25 — NOT Render)
+//
+// If nothing is configured, the caller falls back to direct SMTP which will
+// fail on Render — leads will be marked RISKY because SMTP can't run.
 
 import type { SmtpVerifyResult } from './emailVerify'
+
+function getProxyConfig(): { url: string; secret: string } | null {
+  const url = process.env.SMTP_PROXY_URL?.trim()
+  const secret = process.env.SMTP_PROXY_SECRET?.trim()
+  if (!url || !secret) return null
+  return { url: url.replace(/\/$/, ''), secret } // trim trailing slash
+}
 
 function getProvider(): string | null {
   const p = process.env.EMAIL_VERIFY_PROVIDER?.toLowerCase().trim()
@@ -34,55 +46,103 @@ function getProvider(): string | null {
 }
 
 /**
- * Check if a third-party verification provider is configured.
+ * Check if ANY verification provider is configured (proxy OR third-party API).
  * Use this to decide whether to call verifyViaApi() or fall back to direct SMTP.
  */
 export function hasApiProvider(): boolean {
-  return getProvider() !== null
+  return getProxyConfig() !== null || getProvider() !== null
 }
 
 /**
- * Verify an email address via the configured third-party API.
+ * Verify an email address via the configured provider (proxy or third-party API).
  * Returns a SmtpVerifyResult matching the shape of the direct SMTP verifier
  * so the caller can use either interchangeably.
  *
  * Throws on network/auth errors — caller should catch and treat as 'unknown'.
  */
 export async function verifyViaApi(email: string): Promise<SmtpVerifyResult> {
-  const provider = getProvider()
-  if (!provider) {
-    throw new Error('No EMAIL_VERIFY_PROVIDER configured')
+  // ─── Priority 1: Self-hosted proxy (free) ───
+  const proxy = getProxyConfig()
+  if (proxy) {
+    try {
+      return await verifyViaProxy(email, proxy.url, proxy.secret)
+    } catch (e: any) {
+      console.error('[verify] proxy error:', e?.message)
+      // Fall through to third-party API if proxy fails
+      if (!getProvider()) throw e
+    }
   }
 
+  // ─── Priority 2: Third-party API (paid) ───
+  const provider = getProvider()
+  if (provider) {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 15_000)
+    try {
+      if (provider === 'kickbox') {
+        return await verifyKickbox(email, controller.signal)
+      } else if (provider === 'zerobounce') {
+        return await verifyZeroBounce(email, controller.signal)
+      } else if (provider === 'abstract') {
+        return await verifyAbstract(email, controller.signal)
+      } else {
+        throw new Error(`Unknown EMAIL_VERIFY_PROVIDER: ${provider}`)
+      }
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
+
+  throw new Error('No verification provider configured (set SMTP_PROXY_URL or EMAIL_VERIFY_PROVIDER)')
+}
+
+// ─── Self-hosted proxy (Fly.io) ──────────────────────────────────────────────
+// Calls your own SMTP proxy running on Fly.io. The proxy does the real SMTP
+// RCPT TO check on port 25 (Fly.io allows it; Render doesn't).
+//
+// Request:  POST {proxyUrl}/verify
+//           Headers: { X-Proxy-Secret: <secret>, Content-Type: application/json }
+//           Body: { email: "...", checkCatchAll: true }
+//
+// Response: { status: "valid"|"invalid"|"unknown"|"catch-all", details: "...", catchAll: bool }
+async function verifyViaProxy(email: string, proxyUrl: string, secret: string): Promise<SmtpVerifyResult> {
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 15_000) // 15s hard limit
+  const timeout = setTimeout(() => controller.abort(), 20_000) // 20s — proxy does its own SMTP check
 
   try {
-    if (provider === 'kickbox') {
-      return await verifyKickbox(email, controller.signal)
-    } else if (provider === 'zerobounce') {
-      return await verifyZeroBounce(email, controller.signal)
-    } else if (provider === 'abstract') {
-      return await verifyAbstract(email, controller.signal)
-    } else {
-      throw new Error(`Unknown EMAIL_VERIFY_PROVIDER: ${provider}`)
+    const res = await fetch(`${proxyUrl}/verify`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Proxy-Secret': secret,
+      },
+      body: JSON.stringify({ email, checkCatchAll: true }),
+      signal: controller.signal,
+    })
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      if (res.status === 401) {
+        throw new Error(`Proxy auth failed — check SMTP_PROXY_SECRET matches the PROXY_SECRET set on Fly.io`)
+      }
+      throw new Error(`Proxy returned ${res.status}: ${text}`)
+    }
+
+    const data: any = await res.json()
+    // Proxy returns status: 'valid' | 'invalid' | 'unknown' | 'catch-all'
+    // Map to our SmtpVerifyResult shape
+    return {
+      status: data.status, // already matches our union type
+      response: data.response,
+      details: data.details || `Proxy: ${data.status}`,
     }
   } finally {
     clearTimeout(timeout)
   }
 }
 
-// ─── Kickbox ─────────────────────────────────────────────────────────────────
+// ─── Kickbox (paid) ──────────────────────────────────────────────────────────
 // Docs: https://docs.kickbox.com/v2.0/reference#verify-an-email
-// Response:
-//   {
-//     "result": "deliverable" | "undeliverable" | "risky" | "unknown",
-//     "reason": "accepted_email" | "invalid_domain" | "invalid_email" | ...,
-//     "role": true/false,
-//     "free": true/false,
-//     "disposable": true/false,
-//     "accept_all": true/false  ← catch-all detection
-//   }
 async function verifyKickbox(email: string, signal: AbortSignal): Promise<SmtpVerifyResult> {
   const apiKey = process.env.EMAIL_VERIFY_API_KEY!
   const url = `https://api.kickbox.com/v2/verify?email=${encodeURIComponent(email)}&apikey=${encodeURIComponent(apiKey)}`
@@ -93,11 +153,6 @@ async function verifyKickbox(email: string, signal: AbortSignal): Promise<SmtpVe
   }
   const data: any = await res.json()
 
-  // Map Kickbox result → our SmtpVerifyResult
-  //   deliverable   → valid    (SMTP 250 + not catch-all)
-  //   undeliverable → invalid  (SMTP 550 — mailbox doesn't exist)
-  //   risky         → catch-all if accept_all=true, else unknown
-  //   unknown       → unknown  (couldn't verify)
   if (data.result === 'deliverable') {
     return {
       status: data.accept_all ? 'catch-all' : 'valid',
@@ -125,14 +180,7 @@ async function verifyKickbox(email: string, signal: AbortSignal): Promise<SmtpVe
   }
 }
 
-// ─── ZeroBounce ──────────────────────────────────────────────────────────────
-// Docs: https://www.zerobounce.net/docs/
-// Response:
-//   {
-//     "status": "valid" | "invalid" | "catch-all" | "unknown" | "spamtrap" | "abuse" | "do_not_mail",
-//     "sub_status": "role_based" | "free_email" | "disposable_email" | ...,
-//     ...
-//   }
+// ─── ZeroBounce (paid) ───────────────────────────────────────────────────────
 async function verifyZeroBounce(email: string, signal: AbortSignal): Promise<SmtpVerifyResult> {
   const apiKey = process.env.EMAIL_VERIFY_API_KEY!
   const url = `https://api.zerobounce.net/v2/validate?api_key=${encodeURIComponent(apiKey)}&email=${encodeURIComponent(email)}`
@@ -143,63 +191,20 @@ async function verifyZeroBounce(email: string, signal: AbortSignal): Promise<Smt
   }
   const data: any = await res.json()
 
-  // Map ZeroBounce status → our SmtpVerifyResult
   if (data.status === 'valid') {
-    return {
-      status: 'valid',
-      response: data.sub_status,
-      details: `ZeroBounce: valid (${data.sub_status || 'none'})`,
-    }
+    return { status: 'valid', response: data.sub_status, details: `ZeroBounce: valid` }
   } else if (data.status === 'invalid') {
-    return {
-      status: 'invalid',
-      response: data.sub_status,
-      details: `ZeroBounce: invalid (${data.sub_status || 'none'})`,
-    }
+    return { status: 'invalid', response: data.sub_status, details: `ZeroBounce: invalid` }
   } else if (data.status === 'catch-all') {
-    return {
-      status: 'catch-all',
-      response: data.sub_status,
-      details: `ZeroBounce: catch-all`,
-    }
-  } else if (data.status === 'spamtrap' || data.status === 'abuse') {
-    // Spam traps and abuse emails are effectively invalid — never send to them
-    return {
-      status: 'invalid',
-      response: data.sub_status,
-      details: `ZeroBounce: ${data.status} (${data.sub_status || 'none'})`,
-    }
-  } else if (data.status === 'do_not_mail') {
-    return {
-      status: 'invalid',
-      response: data.sub_status,
-      details: `ZeroBounce: do_not_mail (${data.sub_status || 'none'})`,
-    }
+    return { status: 'catch-all', response: data.sub_status, details: `ZeroBounce: catch-all` }
+  } else if (data.status === 'spamtrap' || data.status === 'abuse' || data.status === 'do_not_mail') {
+    return { status: 'invalid', response: data.sub_status, details: `ZeroBounce: ${data.status}` }
   } else {
-    return {
-      status: 'unknown',
-      response: data.sub_status,
-      details: `ZeroBounce: ${data.status} (${data.sub_status || 'none'})`,
-    }
+    return { status: 'unknown', response: data.sub_status, details: `ZeroBounce: ${data.status}` }
   }
 }
 
-// ─── Abstract API ────────────────────────────────────────────────────────────
-// Docs: https://app.abstractapi.com/api/email-validation/documentation
-// Response:
-//   {
-//     "email": "...",
-//     "autocorrect": "",
-//     "deliverability": "DELIVERABLE" | "UNDELIVERABLE" | "RISKY" | "UNKNOWN",
-//     "quality_score": "0.95",
-//     "is_valid_format": true,
-//     "is_free_email": true,
-//     "is_disposable_email": false,
-//     "is_role_email": false,
-//     "is_catchall_email": false,
-//     "is_mx_found": true,
-//     "is_smtp_valid": true   ← this is the key field for SMTP mailbox check
-//   }
+// ─── Abstract API (paid) ─────────────────────────────────────────────────────
 async function verifyAbstract(email: string, signal: AbortSignal): Promise<SmtpVerifyResult> {
   const apiKey = process.env.EMAIL_VERIFY_API_KEY!
   const url = `https://emails.abstractapi.com/v1/?api_key=${encodeURIComponent(apiKey)}&email=${encodeURIComponent(email)}`
@@ -210,25 +215,16 @@ async function verifyAbstract(email: string, signal: AbortSignal): Promise<SmtpV
   }
   const data: any = await res.json()
 
-  // Abstract gives us is_smtp_valid directly — this is the SMTP mailbox check
   if (data.is_smtp_valid === true) {
     return {
       status: data.is_catchall_email ? 'catch-all' : 'valid',
       response: data.deliverability,
-      details: `Abstract: ${data.deliverability} (smtp_valid=true)`,
+      details: `Abstract: ${data.deliverability}`,
     }
   } else if (data.is_smtp_valid === false) {
-    return {
-      status: 'invalid',
-      response: data.deliverability,
-      details: `Abstract: ${data.deliverability} (smtp_valid=false)`,
-    }
+    return { status: 'invalid', response: data.deliverability, details: `Abstract: ${data.deliverability}` }
   } else {
-    // is_smtp_valid is null/undefined — couldn't verify
-    return {
-      status: 'unknown',
-      response: data.deliverability,
-      details: `Abstract: ${data.deliverability || 'unknown'} (smtp_valid=null)`,
-    }
+    return { status: 'unknown', response: data.deliverability, details: `Abstract: ${data.deliverability || 'unknown'}` }
   }
 }
+

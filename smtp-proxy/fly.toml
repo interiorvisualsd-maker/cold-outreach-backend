@@ -1,0 +1,26 @@
+# SMTP Verification Proxy — Fly.io deployment config
+# See https://fly.io/docs/reference/configuration/ for all options
+
+app = "cold-outreach-smtp-proxy"
+primary_region = "iad"  # US East — close to most email servers
+
+[build]
+  # Build from the Dockerfile in this directory
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false  # keep alive — SMTP checks need instant response
+  auto_start_machines = true
+  min_machines_running = 1    # always-on (within free tier)
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 50
+    soft_limit = 25
+
+# Free tier VM — shared-cpu-1x with 256MB RAM (plenty for this proxy)
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = 256
