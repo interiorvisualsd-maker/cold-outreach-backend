@@ -664,15 +664,36 @@ export async function deepVerify(email: string): Promise<VerificationResult> {
   let status: 'VERIFIED' | 'RISKY' | 'BAD'
   let reason: string | undefined
   if (smtp.status === 'invalid') {
+    // SMTP 550 = mailbox definitively doesn't exist → BAD
     status = 'BAD'
     reason = 'mailbox_does_not_exist'
-  } else if (score >= 50 && smtp.status === 'valid' && !catchAll) {
-    status = 'VERIFIED'
-  } else {
+  } else if (catchAll) {
+    // Catch-all domain accepts everything → can't verify mailbox → RISKY
     status = 'RISKY'
-    if (catchAll) reason = 'catch_all_domain'
-    else if (smtp.status === 'unknown') reason = 'smtp_unknown'
-    else if (smtp.status === 'valid' && catchAll) reason = 'catch_all_domain'
+    reason = 'catch_all_domain'
+  } else if (score >= 50) {
+    // ─── Key fix: SMTP 'unknown' does NOT block VERIFIED ───
+    // On cloud hosts (Render, AWS, GCP, etc.) outbound port 25 is blocked,
+    // so SMTP mailbox verification often returns 'unknown' (can't connect).
+    // That's a NETWORK limitation, not a signal about the email's validity.
+    //
+    // If the email passed all 9 other layers (syntax, domain, MX, disposable,
+    // role, free, typo, score ≥ 50), we mark it VERIFIED. The SMTP layer
+    // becomes a "bonus" check that provides extra confidence when the network
+    // allows it, not a hard requirement.
+    //
+    // The lead's verificationResults still record smtp.status='unknown' so the
+    // user can see SMTP wasn't checked. And if SMTP returns 'invalid' (550),
+    // we already caught that above and marked BAD.
+    status = 'VERIFIED'
+    if (smtp.status === 'unknown') {
+      // Note: still VERIFIED, but flag that SMTP couldn't be verified
+      reason = 'verified_smtp_unchecked'
+    }
+  } else {
+    // Score < 50 (role-based -10, free -5, etc. stacked) → RISKY
+    status = 'RISKY'
+    reason = 'low_score'
   }
 
   return {
