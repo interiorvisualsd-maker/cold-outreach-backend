@@ -28,10 +28,7 @@
 // | Verifalia               | 750      | Daily   | ❌ Charged     |
 // | Reoon                   | 600      | Monthly | ❌ Charged     |
 // | MailboxValidator        | 300      | Monthly | ❌ Charged     |
-// | Abstract API            | 100      | Monthly | ❌ Charged     |
-// | (ZeroBounce removed — requires business email, blocks Gmail)
-// | Hunter.io               | 50       | Monthly | ❌ Charged     |
-// | TOTAL                   | ~12,200  |         |               |
+// | TOTAL                   | ~11,950  |         |               |
 //
 // With pre-filtering (syntax + DNS + MX + disposable + typo removes ~40%
 // before SMTP), this covers ~20,000 raw emails/month for $0.
@@ -78,8 +75,6 @@ export type ProviderId =
   | 'verifalia'
   | 'reoon'
   | 'mailboxvalidator'
-  | 'abstract'
-  | 'hunter'
   | 'flyio'
 
 interface ProviderConfig {
@@ -187,30 +182,6 @@ export const PROVIDER_CONFIG: Record<ProviderId, ProviderConfig> = {
     envVarName: 'MAILBOXVALIDATOR_API_KEY',
     signupUrl: 'https://www.mailboxvalidator.com',
     docsUrl: 'https://www.mailboxvalidator.com/api-email-validation',
-  },
-  abstract: {
-    id: 'abstract',
-    label: 'Abstract API',
-    freeLimit: 100, // monthly
-    quotaType: 'MONTHLY',
-    unknownFree: false,
-    priority: 8,
-    maxConcurrency: 1, // 1 req/sec
-    envVarName: 'ABSTRACT_API_KEY',
-    signupUrl: 'https://www.abstractapi.com/api/email-validation',
-    docsUrl: 'https://app.abstractapi.com/api/email-validation/documentation',
-  },
-  hunter: {
-    id: 'hunter',
-    label: 'Hunter.io',
-    freeLimit: 50, // monthly
-    quotaType: 'MONTHLY',
-    unknownFree: false,
-    priority: 9, // renumbered after ZeroBounce removal
-    maxConcurrency: 2,
-    envVarName: 'HUNTER_API_KEY',
-    signupUrl: 'https://hunter.io',
-    docsUrl: 'https://hunter.io/api-documentation/v2#email-verifier',
   },
   flyio: {
     id: 'flyio',
@@ -618,48 +589,6 @@ async function verifyMailboxValidator(email: string, apiKey: string, signal: Abo
   }
 }
 
-async function verifyAbstract(email: string, apiKey: string, signal: AbortSignal): Promise<SmtpVerifyResult> {
-  const url = `https://emailvalidation.abstractapi.com/v1/?api_key=${encodeURIComponent(apiKey)}&email=${encodeURIComponent(email)}`
-  const res = await fetch(url, { signal })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`Abstract API ${res.status}: ${text}`)
-  }
-  const data: any = await res.json()
-  // Abstract returns: { deliverability: "DELIVERABLE"|"UNDELIVERABLE"|"RISKY"|"UNKNOWN", is_smtp_valid: true|false|null, is_catchall_email: true|false, ... }
-  if (data.is_smtp_valid === true) {
-    return { status: data.is_catchall_email ? 'catch-all' : 'valid', response: data.deliverability, details: `Abstract: ${data.deliverability}` }
-  } else if (data.is_smtp_valid === false) {
-    return { status: 'invalid', response: data.deliverability, details: `Abstract: ${data.deliverability}` }
-  } else {
-    return { status: 'unknown', response: data.deliverability, details: `Abstract: ${data.deliverability || 'unknown'}` }
-  }
-}
-
-async function verifyHunter(email: string, apiKey: string, signal: AbortSignal): Promise<SmtpVerifyResult> {
-  const url = `https://api.hunter.io/v2/email-verifier?email=${encodeURIComponent(email)}&api_key=${encodeURIComponent(apiKey)}`
-  const res = await fetch(url, { signal })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`Hunter.io ${res.status}: ${text}`)
-  }
-  const data: any = await res.json()
-  // Hunter returns: { data: { status: "valid"|"invalid"|"accept_all"|"webmail"|"disposable"|"unknown", ... } }
-  const result = data.data || data
-  const status = (result.status || '').toLowerCase()
-  if (status === 'valid') {
-    return { status: 'valid', response: result.result, details: `Hunter: valid` }
-  } else if (status === 'invalid') {
-    return { status: 'invalid', response: result.result, details: `Hunter: invalid` }
-  } else if (status === 'accept_all') {
-    return { status: 'catch-all', response: result.result, details: `Hunter: accept-all` }
-  } else if (status === 'disposable' || status === 'webmail') {
-    return { status: 'invalid', response: result.result, details: `Hunter: ${status}` }
-  } else {
-    return { status: 'unknown', response: result.result, details: `Hunter: ${status || 'unknown'}` }
-  }
-}
-
 async function verifyFlyIoProxy(email: string, encodedConfig: string, signal: AbortSignal): Promise<SmtpVerifyResult> {
   // Fly.io config is encoded as "url|secret"
   const [proxyUrl, secret] = encodedConfig.split('|')
@@ -705,8 +634,6 @@ const PROVIDER_ADAPTERS: Record<ProviderId, (email: string, apiKey: string, sign
   verifalia: verifyVerifalia,
   reoon: verifyReoon,
   mailboxvalidator: verifyMailboxValidator,
-  abstract: verifyAbstract,
-  hunter: verifyHunter,
   flyio: verifyFlyIoProxy,
 }
 
