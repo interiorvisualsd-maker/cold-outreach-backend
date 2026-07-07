@@ -180,38 +180,51 @@ app.post('/campaign/:campaignId', async (c) => {
   if (campaign.ownerId !== userId) return c.json({ error: 'Not found' }, 404)
 
   // ─── Which leads to re-verify? ───
-  // DEFAULT (force=false): re-verify any lead that is NOT VERIFIED.
-  //   This includes PENDING, VERIFYING (stuck), RISKY, BAD, and null/empty.
-  //   Leads already VERIFIED are skipped — they passed all layers and don't
-  //   need re-checking. This matches the user's expectation: "if a lead
-  //   already passed through all the verification steps, it should be ignored."
+  // DEFAULT (force=false, includeBad=false): re-verify PENDING + VERIFYING + RISKY.
+  //   - VERIFIED leads are SKIPPED (they passed all layers — no need to re-check)
+  //   - BAD leads are SKIPPED (user explicitly requested: "any lead already marked
+  //     as bad should not be reverified unless i go to the page section and
+  //     request for it")
+  //   - RISKY leads ARE re-verified (often got that way due to transient SMTP
+  //     failures — worth a second chance)
+  //   - PENDING + VERIFYING (stuck) leads are re-verified
   //
-  //   Rationale for re-verifying RISKY/BAD:
-  //   - RISKY leads often got that way because SMTP returned 'unknown' (network
-  //     failure, greylisting, port 25 blocked). Re-running may give a different
-  //     result if the network issue was transient.
-  //   - BAD leads from a previous run may have been caused by a transient DNS
-  //     failure. Re-running gives them a second chance.
-  //   - The verification engine is idempotent — re-running on a lead that's
-  //     genuinely BAD will just reconfirm BAD.
+  // INCLUDE_BAD (includeBad=true, force=false): re-verify PENDING + VERIFYING +
+  //   RISKY + BAD. The frontend exposes this as a checkbox "Include BAD leads"
+  //   next to the Start Verification button. Use when you've fixed the SMTP
+  //   provider config and want to re-check previously-BAD leads.
   //
   // FORCE (force=true): re-verify EVERY lead, including VERIFIED ones.
   //   Use this when you want to re-check everything (e.g. after a verification
-  //   logic update, or after adding a new domain to the disposable list).
+  //   logic update). Not currently exposed in the UI — call the API directly
+  //   with { force: true } in the body.
   const force = !!body.force
+  const includeBad = !!body.includeBad
   const where = force
     ? { campaignId }
-    : {
-        campaignId,
-        OR: [
-          { verificationStatus: 'PENDING' },
-          { verificationStatus: 'VERIFYING' },
-          { verificationStatus: 'RISKY' },
-          { verificationStatus: 'BAD' },
-          { verificationStatus: null },
-          { verificationStatus: '' },
-        ],
-      }
+    : includeBad
+      ? {
+          campaignId,
+          OR: [
+            { verificationStatus: 'PENDING' },
+            { verificationStatus: 'VERIFYING' },
+            { verificationStatus: 'RISKY' },
+            { verificationStatus: 'BAD' },
+            { verificationStatus: null },
+            { verificationStatus: '' },
+          ],
+        }
+      : {
+          // DEFAULT: skip VERIFIED and BAD
+          campaignId,
+          OR: [
+            { verificationStatus: 'PENDING' },
+            { verificationStatus: 'VERIFYING' },
+            { verificationStatus: 'RISKY' },
+            { verificationStatus: null },
+            { verificationStatus: '' },
+          ],
+        }
   const leads = await db.lead.findMany({
     where,
     select: { id: true, ownerId: true },

@@ -138,6 +138,25 @@ export async function verifyMailboxSmtp(
   mxHosts: string[],
   timeoutMs = 10000
 ): Promise<SmtpVerifyResult> {
+  // ─── Prefer third-party API when configured ────────────────────────────
+  // Cloud hosts (Render, AWS, GCP, etc.) block outbound port 25, making
+  // direct SMTP verification impossible. If a third-party provider is
+  // configured (EMAIL_VERIFY_PROVIDER + EMAIL_VERIFY_API_KEY), use it —
+  // the API runs the real SMTP mailbox check from their own infrastructure.
+  //
+  // See src/lib/emailVerifyApi.ts for provider setup details.
+  const { hasApiProvider, verifyViaApi } = await import('./emailVerifyApi')
+  if (hasApiProvider()) {
+    try {
+      return await verifyViaApi(email)
+    } catch (e: any) {
+      console.error('[verify] API provider error:', e?.message)
+      return { status: 'unknown', details: `API error: ${e?.message || 'unknown'}` }
+    }
+  }
+
+  // ─── Direct SMTP (fallback) ────────────────────────────────────────────
+  // Only works on hosts that allow outbound port 25 (NOT Render/AWS/GCP).
   if (mxHosts.length === 0) {
     return { status: 'unknown', details: 'No MX records for domain' }
   }
@@ -153,7 +172,7 @@ export async function verifyMailboxSmtp(
       continue
     }
   }
-  return { status: 'unknown', details: 'All MX hosts unreachable or timed out' }
+  return { status: 'unknown', details: 'All MX hosts unreachable or timed out (port 25 may be blocked — set EMAIL_VERIFY_PROVIDER to use a third-party API)' }
 }
 
 async function trySmtpRcpt(
@@ -671,29 +690,27 @@ export async function deepVerify(email: string): Promise<VerificationResult> {
     // Catch-all domain accepts everything → can't verify mailbox → RISKY
     status = 'RISKY'
     reason = 'catch_all_domain'
-  } else if (score >= 50) {
-    // ─── Key fix: SMTP 'unknown' does NOT block VERIFIED ───
-    // On cloud hosts (Render, AWS, GCP, etc.) outbound port 25 is blocked,
-    // so SMTP mailbox verification often returns 'unknown' (can't connect).
-    // That's a NETWORK limitation, not a signal about the email's validity.
+  } else if (smtp.status === 'valid' && score >= 50) {
+    // ─── SMTP 'valid' is REQUIRED for VERIFIED ───
+    // The user explicitly wants all verification layers to pass, including
+    // real SMTP mailbox verification. A lead is only VERIFIED if:
+    //   1. SMTP returned 'valid' (the mailbox accepted the RCPT TO)
+    //   2. The domain is NOT catch-all
+    //   3. The composite score is ≥ 50
     //
-    // If the email passed all 9 other layers (syntax, domain, MX, disposable,
-    // role, free, typo, score ≥ 50), we mark it VERIFIED. The SMTP layer
-    // becomes a "bonus" check that provides extra confidence when the network
-    // allows it, not a hard requirement.
-    //
-    // The lead's verificationResults still record smtp.status='unknown' so the
-    // user can see SMTP wasn't checked. And if SMTP returns 'invalid' (550),
-    // we already caught that above and marked BAD.
+    // NOTE: On cloud hosts (Render/AWS/GCP) outbound port 25 is blocked,
+    // so direct SMTP verification fails. To get SMTP working, set up a
+    // third-party verification API (EMAIL_VERIFY_PROVIDER + EMAIL_VERIFY_API_KEY
+    // env vars). Without it, NO leads can be VERIFIED — they'll all be RISKY.
+    // See src/lib/emailVerifyApi.ts for provider options.
     status = 'VERIFIED'
-    if (smtp.status === 'unknown') {
-      // Note: still VERIFIED, but flag that SMTP couldn't be verified
-      reason = 'verified_smtp_unchecked'
-    }
   } else {
-    // Score < 50 (role-based -10, free -5, etc. stacked) → RISKY
+    // SMTP 'unknown' (couldn't verify — port 25 blocked, timeout, etc.) → RISKY
+    // SMTP 'valid' but score < 50 → RISKY (role + free + other penalties stacked)
     status = 'RISKY'
-    reason = 'low_score'
+    if (smtp.status === 'unknown') reason = 'smtp_not_verified'
+    else if (score < 50) reason = 'low_score'
+    else reason = 'smtp_unverified'
   }
 
   return {
