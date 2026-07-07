@@ -29,7 +29,7 @@
 // | Reoon                   | 600      | Monthly | ❌ Charged     |
 // | MailboxValidator        | 300      | Monthly | ❌ Charged     |
 // | Abstract API            | 100      | Monthly | ❌ Charged     |
-// | ZeroBounce              | 100      | Monthly | ❌ Charged     |
+// | (ZeroBounce removed — requires business email, blocks Gmail)
 // | Hunter.io               | 50       | Monthly | ❌ Charged     |
 // | TOTAL                   | ~12,200  |         |               |
 //
@@ -79,7 +79,6 @@ export type ProviderId =
   | 'reoon'
   | 'mailboxvalidator'
   | 'abstract'
-  | 'zerobounce'
   | 'hunter'
   | 'flyio'
 
@@ -201,25 +200,13 @@ export const PROVIDER_CONFIG: Record<ProviderId, ProviderConfig> = {
     signupUrl: 'https://www.abstractapi.com/api/email-validation',
     docsUrl: 'https://app.abstractapi.com/api/email-validation/documentation',
   },
-  zerobounce: {
-    id: 'zerobounce',
-    label: 'ZeroBounce',
-    freeLimit: 100, // monthly
-    quotaType: 'MONTHLY',
-    unknownFree: false,
-    priority: 9,
-    maxConcurrency: 3,
-    envVarName: 'ZEROBOUNCE_API_KEY',
-    signupUrl: 'https://www.zerobounce.net',
-    docsUrl: 'https://www.zerobounce.net/docs/',
-  },
   hunter: {
     id: 'hunter',
     label: 'Hunter.io',
     freeLimit: 50, // monthly
     quotaType: 'MONTHLY',
     unknownFree: false,
-    priority: 10,
+    priority: 9, // renumbered after ZeroBounce removal
     maxConcurrency: 2,
     envVarName: 'HUNTER_API_KEY',
     signupUrl: 'https://hunter.io',
@@ -649,28 +636,6 @@ async function verifyAbstract(email: string, apiKey: string, signal: AbortSignal
   }
 }
 
-async function verifyZeroBounce(email: string, apiKey: string, signal: AbortSignal): Promise<SmtpVerifyResult> {
-  const url = `https://api.zerobounce.net/v2/validate?api_key=${encodeURIComponent(apiKey)}&email=${encodeURIComponent(email)}`
-  const res = await fetch(url, { signal })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`ZeroBounce ${res.status}: ${text}`)
-  }
-  const data: any = await res.json()
-  // ZeroBounce returns: { status: "valid"|"invalid"|"catch-all"|"unknown"|"spamtrap"|"abuse"|"do_not_mail", sub_status: "..." }
-  if (data.status === 'valid') {
-    return { status: 'valid', response: data.sub_status, details: `ZeroBounce: valid` }
-  } else if (data.status === 'invalid') {
-    return { status: 'invalid', response: data.sub_status, details: `ZeroBounce: invalid` }
-  } else if (data.status === 'catch-all') {
-    return { status: 'catch-all', response: data.sub_status, details: `ZeroBounce: catch-all` }
-  } else if (data.status === 'spamtrap' || data.status === 'abuse' || data.status === 'do_not_mail') {
-    return { status: 'invalid', response: data.sub_status, details: `ZeroBounce: ${data.status}` }
-  } else {
-    return { status: 'unknown', response: data.sub_status, details: `ZeroBounce: ${data.status}` }
-  }
-}
-
 async function verifyHunter(email: string, apiKey: string, signal: AbortSignal): Promise<SmtpVerifyResult> {
   const url = `https://api.hunter.io/v2/email-verifier?email=${encodeURIComponent(email)}&api_key=${encodeURIComponent(apiKey)}`
   const res = await fetch(url, { signal })
@@ -741,7 +706,6 @@ const PROVIDER_ADAPTERS: Record<ProviderId, (email: string, apiKey: string, sign
   reoon: verifyReoon,
   mailboxvalidator: verifyMailboxValidator,
   abstract: verifyAbstract,
-  zerobounce: verifyZeroBounce,
   hunter: verifyHunter,
   flyio: verifyFlyIoProxy,
 }
