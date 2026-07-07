@@ -732,3 +732,56 @@ export function hasApiProviderSync(): boolean {
     (c) => process.env[c.envVarName]?.trim()
   ) || !!(process.env.SMTP_PROXY_URL?.trim() && process.env.SMTP_PROXY_SECRET?.trim())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-provider test function (used by the Test button in the settings UI)
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests a SPECIFIC provider with a known test email, bypassing the router.
+// This is critical for debugging — the Test button needs to tell the user
+// whether THIS provider's API key works, not whether "some provider" worked.
+
+export async function testSpecificProvider(
+  providerId: ProviderId,
+  userId: string
+): Promise<{ ok: boolean; status?: string; details?: string; error?: string }> {
+  const config = PROVIDER_CONFIG[providerId]
+  if (!config) {
+    return { ok: false, error: 'Unknown provider' }
+  }
+
+  // Get the API key for this specific provider
+  const apiKeys = await getUserApiKeys(userId)
+  const apiKey = apiKeys[providerId]
+  if (!apiKey) {
+    return { ok: false, error: `${config.label} is not configured — add your API key first` }
+  }
+
+  // Use a known-good test email (Gmail always exists)
+  const testEmail = 'test@gmail.com'
+
+  const controller = new AbortController()
+  // EmailAwesome is slow (async 2-step) — give it 60s for the test
+  const timeoutMs = providerId === 'emailawesome' ? 60_000 : providerId === 'flyio' ? 30_000 : 20_000
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const adapter = PROVIDER_ADAPTERS[providerId]
+    const result = await adapter(testEmail, apiKey, controller.signal)
+    return {
+      ok: true,
+      status: result.status,
+      details: result.details,
+    }
+  } catch (e: any) {
+    const errorMsg = e?.name === 'AbortError'
+      ? `Timeout after ${timeoutMs / 1000}s`
+      : e?.message || 'Unknown error'
+    console.error(`[test] ${providerId} failed:`, errorMsg)
+    return {
+      ok: false,
+      error: errorMsg,
+    }
+  } finally {
+    clearTimeout(timeout)
+  }
+}

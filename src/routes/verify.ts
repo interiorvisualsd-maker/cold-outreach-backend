@@ -598,7 +598,7 @@ app.post('/suppress/bulk', async (c) => {
 // via the settings page. Keys are stored in the Setting table (per-user)
 // with the prefix `verify_key_<providerId>`.
 
-import { getProviderQuotaInfo, invalidateApiKeyCache, PROVIDER_CONFIG } from '../lib/emailVerifyApi'
+import { getProviderQuotaInfo, invalidateApiKeyCache, PROVIDER_CONFIG, testSpecificProvider } from '../lib/emailVerifyApi'
 import type { ProviderId } from '../lib/emailVerifyApi'
 
 // GET /api/verify/providers — list all providers with quota + config status
@@ -667,36 +667,35 @@ app.delete('/providers/:providerId', async (c) => {
   return c.json({ ok: true, provider: providerId, configured: false })
 })
 
-// GET /api/verify/providers/test/:providerId — test a provider's API key
+// GET /api/verify/providers/test/:providerId — test a SPECIFIC provider's API key
+// This bypasses the router and calls ONLY the requested provider, so the user
+// gets accurate feedback on whether THAT provider's key works.
 app.get('/providers/test/:providerId', async (c) => {
   const userId = getUserId(c)
   const providerId = c.req.param('providerId') as ProviderId
 
+  console.log(`[verify-test] user=${userId} provider=${providerId}`)
+
   if (!PROVIDER_CONFIG[providerId]) {
-    return c.json({ error: 'Unknown provider' }, 400)
+    return c.json({ ok: false, error: 'Unknown provider' }, 400)
   }
 
-  // Use a known-good test email
-  const testEmail = 'test@gmail.com'
-  try {
-    const { verifyViaApi } = await import('../lib/emailVerifyApi')
-    // Force-test this specific provider by temporarily making it the only one
-    // We can't easily do that with the current router, so we just call the
-    // router and check if it used the requested provider.
-    const result = await verifyViaApi(testEmail, userId)
+  const result = await testSpecificProvider(providerId, userId)
+  console.log(`[verify-test] ${providerId} result:`, result)
+
+  if (result.ok) {
     return c.json({
       ok: true,
-      providerUsed: result.providerUsed,
+      provider: providerId,
       status: result.status,
       details: result.details,
-      requestedProvider: providerId,
-      matched: result.providerUsed === providerId,
     })
-  } catch (e: any) {
+  } else {
     return c.json({
       ok: false,
-      error: e?.message || 'Test failed',
-    }, 500)
+      provider: providerId,
+      error: result.error,
+    }, 200) // 200 with ok=false so the frontend can read the error message
   }
 })
 

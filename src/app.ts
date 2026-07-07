@@ -35,15 +35,25 @@ app.use('*', cors({
 }))
 
 // ─── Request logger ───────────────────────────────────────────────────────
+// Logs all mutating requests (POST/PUT/DELETE) + all verification-related
+// requests (including GETs) so the user can see test/verify activity in
+// the Render logs.
 app.use('*', async (c, next) => {
   await next()
   const method = c.req.method
-  if (method === 'GET' || method === 'OPTIONS' || method === 'HEAD') return
   const path = c.req.path
   const status = c.res.status
   const ts = new Date().toISOString()
   if (path === '/api/health') return
-  console.log(`[${ts}] ${method} ${path} → ${status}`)
+  // Log all mutating requests
+  if (method !== 'GET' && method !== 'OPTIONS' && method !== 'HEAD') {
+    console.log(`[${ts}] ${method} ${path} → ${status}`)
+    return
+  }
+  // Also log verification-related GETs (test, providers, job-status, campaigns)
+  if (method === 'GET' && path.startsWith('/api/verify/')) {
+    console.log(`[${ts}] ${method} ${path} → ${status}`)
+  }
 })
 
 // Health check (public)
