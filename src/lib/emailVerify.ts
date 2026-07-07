@@ -136,27 +136,55 @@ function getHeloDomain(): string {
 export async function verifyMailboxSmtp(
   email: string,
   mxHosts: string[],
-  timeoutMs = 10000
+  timeoutMs = 10000,
+  userId?: string
 ): Promise<SmtpVerifyResult> {
-  // ─── Prefer third-party API when configured ────────────────────────────
+  // ─── Prefer multi-provider API router when configured ────────────────
   // Cloud hosts (Render, AWS, GCP, etc.) block outbound port 25, making
-  // direct SMTP verification impossible. If a third-party provider is
-  // configured (EMAIL_VERIFY_PROVIDER + EMAIL_VERIFY_API_KEY), use it —
-  // the API runs the real SMTP mailbox check from their own infrastructure.
+  // direct SMTP verification impossible. The multi-provider router in
+  // emailVerifyApi.ts rotates between 10 free-tier verification APIs
+  // (BillionVerify, QuickEmailVerification, MyEmailVerifier, etc.) and
+  // falls back to a Fly.io proxy if all are exhausted.
   //
-  // See src/lib/emailVerifyApi.ts for provider setup details.
-  const { hasApiProvider, verifyViaApi } = await import('./emailVerifyApi')
-  if (hasApiProvider()) {
+  // The router needs a userId to:
+  //   1. Look up per-user API keys (from the Setting table)
+  //   2. Track per-user quota usage (in the ProviderQuota table)
+  //
+  // If no userId is provided (legacy callers), we fall back to env-var-only
+  // configuration and skip quota tracking.
+  const { hasApiProviderSync, verifyViaApi } = await import('./emailVerifyApi')
+  if (userId) {
     try {
-      return await verifyViaApi(email)
+      const result = await verifyViaApi(email, userId)
+      return {
+        status: result.status,
+        code: result.code,
+        response: result.response,
+        details: result.details,
+      }
+    } catch (e: any) {
+      console.error('[verify] router error:', e?.message)
+      return { status: 'unknown', details: `Router error: ${e?.message || 'unknown'}` }
+    }
+  }
+
+  // Legacy path: no userId — check env vars only
+  if (hasApiProviderSync()) {
+    try {
+      const result = await verifyViaApi(email)
+      return {
+        status: result.status,
+        code: result.code,
+        response: result.response,
+        details: result.details,
+      }
     } catch (e: any) {
       console.error('[verify] API provider error:', e?.message)
       return { status: 'unknown', details: `API error: ${e?.message || 'unknown'}` }
     }
   }
 
-  // ─── Direct SMTP (fallback) ────────────────────────────────────────────
-  // Only works on hosts that allow outbound port 25 (NOT Render/AWS/GCP).
+  // ─── Direct SMTP (final fallback — only works on hosts that allow port 25) ───
   if (mxHosts.length === 0) {
     return { status: 'unknown', details: 'No MX records for domain' }
   }
@@ -172,7 +200,7 @@ export async function verifyMailboxSmtp(
       continue
     }
   }
-  return { status: 'unknown', details: 'All MX hosts unreachable or timed out (port 25 may be blocked — set EMAIL_VERIFY_PROVIDER to use a third-party API)' }
+  return { status: 'unknown', details: 'All MX hosts unreachable or timed out (port 25 blocked — configure verification providers in Settings)' }
 }
 
 async function trySmtpRcpt(
@@ -651,19 +679,28 @@ export async function quickVerify(email: string): Promise<VerificationResult> {
 }
 
 // ─── Deep verify (all 10 layers) ───
-export async function deepVerify(email: string): Promise<VerificationResult> {
+export async function deepVerify(email: string, userId?: string): Promise<VerificationResult> {
   const quick = await quickVerify(email)
   if (quick.status === 'BAD') return quick // hard fail — no point probing SMTP
 
   const [, domain] = quick.email.split('@')
   const mxHosts = quick.mxHosts || []
 
-  // Layer 4: SMTP mailbox verification
-  const smtp = await verifyMailboxSmtp(quick.email, mxHosts, 10000)
+  // Layer 4: SMTP mailbox verification — uses multi-provider router
+  // The router rotates between free-tier APIs (BillionVerify, QEV, etc.)
+  // and falls back to Fly.io proxy when all are exhausted.
+  const smtp = await verifyMailboxSmtp(quick.email, mxHosts, 10000, userId)
 
-  // Layer 8: catch-all detection (only if SMTP gave us a usable signal)
+  // Layer 8: catch-all detection
+  // The router already returns catch-all status from the provider API,
+  // so we only need to do our own detection if SMTP gave us a usable
+  // signal AND the provider didn't already flag catch-all.
   let catchAll = false
-  if (smtp.status === 'valid' || smtp.status === 'invalid') {
+  if (smtp.status === 'catch-all') {
+    catchAll = true
+  } else if (smtp.status === 'valid' || smtp.status === 'invalid') {
+    // Provider didn't flag catch-all — do our own check (only works if
+    // port 25 is open, which it isn't on Render, so this is best-effort)
     const ca = await detectCatchAll(domain, mxHosts)
     catchAll = ca.catchAll
   }

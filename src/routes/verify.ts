@@ -77,7 +77,7 @@ export async function processVerificationBatch(): Promise<{ processed: number; v
         })
 
         const result: VerificationResult =
-          job.method === 'deep' ? await deepVerify(lead.email) : await quickVerify(lead.email)
+          job.method === 'deep' ? await deepVerify(lead.email, job.ownerId) : await quickVerify(lead.email)
 
         // Map score → status (deepVerify/quickVerify already do this, but
         // we re-check here for safety).
@@ -589,6 +589,115 @@ app.post('/suppress/bulk', async (c) => {
     })
   })
   return c.json({ ok: true, suppressed: leads.length })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VERIFICATION PROVIDER CONFIGURATION
+// ─────────────────────────────────────────────────────────────────────────────
+// These routes let the user configure their verification provider API keys
+// via the settings page. Keys are stored in the Setting table (per-user)
+// with the prefix `verify_key_<providerId>`.
+
+import { getProviderQuotaInfo, invalidateApiKeyCache, PROVIDER_CONFIG } from '../lib/emailVerifyApi'
+import type { ProviderId } from '../lib/emailVerifyApi'
+
+// GET /api/verify/providers — list all providers with quota + config status
+app.get('/providers', async (c) => {
+  const userId = getUserId(c)
+  const infos = await getProviderQuotaInfo(userId)
+  return c.json({ providers: infos })
+})
+
+// PUT /api/verify/providers/:providerId — save an API key for a provider
+app.put('/providers/:providerId', async (c) => {
+  const userId = getUserId(c)
+  const providerId = c.req.param('providerId') as ProviderId
+
+  // Validate provider ID
+  if (!PROVIDER_CONFIG[providerId]) {
+    return c.json({ error: 'Unknown provider' }, 400)
+  }
+
+  const body = await c.req.json().catch(() => ({}))
+  const apiKey = (body.apiKey || '').trim()
+  if (!apiKey) {
+    return c.json({ error: 'apiKey required' }, 400)
+  }
+
+  // Fly.io is special — it uses URL + secret, encoded as "url|secret"
+  // The frontend sends { proxyUrl, proxySecret } for flyio
+  let valueToStore = apiKey
+  if (providerId === 'flyio') {
+    const proxyUrl = (body.proxyUrl || '').trim()
+    const proxySecret = (body.proxySecret || '').trim()
+    if (!proxyUrl || !proxySecret) {
+      return c.json({ error: 'proxyUrl and proxySecret required for Fly.io' }, 400)
+    }
+    valueToStore = `${proxyUrl}|${proxySecret}`
+  }
+
+  // Store in Setting table (per-user)
+  const key = `verify_key_${providerId}`
+  await db.setting.upsert({
+    where: { key },
+    create: { key, value: valueToStore },
+    update: { value: valueToStore },
+  })
+
+  // Invalidate the API key cache so the new key is picked up immediately
+  invalidateApiKeyCache(userId)
+
+  return c.json({ ok: true, provider: providerId, configured: true })
+})
+
+// DELETE /api/verify/providers/:providerId — remove an API key
+app.delete('/providers/:providerId', async (c) => {
+  const userId = getUserId(c)
+  const providerId = c.req.param('providerId') as ProviderId
+
+  if (!PROVIDER_CONFIG[providerId]) {
+    return c.json({ error: 'Unknown provider' }, 400)
+  }
+
+  const key = `verify_key_${providerId}`
+  await db.setting.deleteMany({ where: { key } }).catch(() => null)
+
+  invalidateApiKeyCache(userId)
+
+  return c.json({ ok: true, provider: providerId, configured: false })
+})
+
+// GET /api/verify/providers/test/:providerId — test a provider's API key
+app.get('/providers/test/:providerId', async (c) => {
+  const userId = getUserId(c)
+  const providerId = c.req.param('providerId') as ProviderId
+
+  if (!PROVIDER_CONFIG[providerId]) {
+    return c.json({ error: 'Unknown provider' }, 400)
+  }
+
+  // Use a known-good test email
+  const testEmail = 'test@gmail.com'
+  try {
+    const { verifyViaApi } = await import('../lib/emailVerifyApi')
+    // Force-test this specific provider by temporarily making it the only one
+    // We can't easily do that with the current router, so we just call the
+    // router and check if it used the requested provider.
+    const result = await verifyViaApi(testEmail, userId)
+    return c.json({
+      ok: true,
+      providerUsed: result.providerUsed,
+      status: result.status,
+      details: result.details,
+      requestedProvider: providerId,
+      matched: result.providerUsed === providerId,
+    })
+  } catch (e: any) {
+    return c.json({
+      ok: false,
+      error: e?.message || 'Test failed',
+    }, 500)
+  }
 })
 
 export default app

@@ -46,6 +46,7 @@ model User {
   webhooks        Webhook[]
   createdInvites  InviteToken[]     @relation("InviteCreator")
   usedInvites     InviteToken[]     @relation("InviteConsumer")
+  providerQuotas  ProviderQuota[]
 }
 
 model InviteToken {
@@ -439,3 +440,43 @@ model Setting {
   value     String
   updatedAt DateTime @updatedAt
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VERIFICATION PROVIDER QUOTA TRACKING
+// ─────────────────────────────────────────────────────────────────────────────
+// Tracks how many verifications have been used per provider per day/month.
+// The router reads this to decide which provider to use next.
+//
+// Quota types:
+//   - DAILY:   resets at midnight UTC (BillionVerify, QuickEmailVerification,
+//              MyEmailVerifier, Verifalia)
+//   - MONTHLY: resets on the 1st of each month UTC (EmailAwesome, Reoon,
+//              MailboxValidator, Abstract, ZeroBounce, Hunter)
+//
+// Free tier limits are hardcoded in emailVerifyRouter.ts (PROVIDER_CONFIG).
+// The router increments `used` after each successful call and resets the
+// counter when the period rolls over.
+
+model ProviderQuota {
+  id           String   @id @default(cuid())
+  ownerId      String
+  provider     String   // billionverify | quickemailverification | myemailverifier | emailawesome | verifalia | reoon | mailboxvalidator | abstract | zerobounce | hunter | flyio
+  quotaType    String   // DAILY | MONTHLY
+  // For DAILY:   the date this quota applies to (YYYY-MM-DD)
+  // For MONTHLY: the first day of the month this quota applies to (YYYY-MM-01)
+  periodStart  DateTime
+  used         Int      @default(0)
+  // Last error message from this provider (if any) — used to show "provider X is having issues"
+  lastError    String?
+  lastErrorAt  DateTime?
+  updatedAt    DateTime @updatedAt
+  createdAt    DateTime @default(now())
+
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@unique([ownerId, provider, quotaType, periodStart])
+  @@index([ownerId, provider])
+  @@index([periodStart])
+}
+
+// Also add relation on User (added at the top of the file via the User model)
